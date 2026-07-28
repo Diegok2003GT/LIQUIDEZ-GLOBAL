@@ -53,6 +53,12 @@ FRED_SERIES = {
     #   serie real (y la que ya usa el resto del programa) es ECBASSETSW.
     "US_TREASURY_ACCOUNT_WDTGAL": "WDTGAL",
     "EUR_USD_FRED": "DEXUSEU",
+    # NUEVO: PANEL MACRO-BITCOIN AVANZADO (US10Y, STLFSI4) - series FRED
+    # verificadas: DGS10 (rendimiento diario del Tesoro a 10 años, % anual)
+    # y STLFSI4 (Índice de Estrés Financiero de San Luis, actualización
+    # semanal, se propaga con ffill como el resto de series FRED).
+    "US_10Y_TREASURY": "DGS10",
+    "FINANCIAL_STRESS_INDEX": "STLFSI4",
 }
 
 # ACTUALIZACIÓN PARCHE: se agrega el par JPY_USD para poder convertir
@@ -213,3 +219,72 @@ SHORT_TERM_LIQUIDITY_COMPONENTS = {
     "RRP": {"label": "Fed - Reverse Repo diario", "column": "RRP_USD_T", "sign": -1},
     "STABLECOINS": {"label": "Capitalización de Stablecoins", "sign": 1},
 }
+
+# =====================================================================
+# NUEVO: PANEL MACRO-BITCOIN AVANZADO (US10Y, STLFSI4, DXY, MVRV Z-Score)
+# =====================================================================
+# Este bloque NO modifica ni interfiere con la Liquidez Global Combinada
+# (arriba). Es un panel aparte, con sus propias 4 filas sincronizadas en
+# el eje X, agregado como una pestaña nueva e independiente.
+
+# Cadencia semanal (mismo criterio que Liquidez Global Combinada: cierre
+# de viernes, último valor real de la semana, nunca un promedio).
+MACRO_PANEL_RESAMPLE_RULE = "W-FRI"
+
+# Requerimiento 2 (US10Y): SMA de mediano/largo plazo sobre la serie ya
+# semanal, para suavizar el ruido de los rendimientos diarios.
+US10Y_SMA_DEFAULT_WEEKS = 20
+US10Y_SMA_MIN_WEEKS = 4
+US10Y_SMA_MAX_WEEKS = 52
+
+# Requerimiento 3 (STLFSI4): umbrales de sombreado de fondo. > 0 significa
+# condiciones financieras más estrictas que el promedio histórico; > 2 es
+# la zona de pánico/crisis bancaria genuina (ej. SVB, marzo 2023).
+STLFSI_STRESS_THRESHOLD = 0.0
+STLFSI_PANIC_THRESHOLD = 2.0
+STLFSI_SHADE_OPACITY_LOW = 0.08
+STLFSI_SHADE_OPACITY_HIGH = 0.28
+STLFSI_SHADE_COLOR_RGB = "220, 38, 38"  # rojo
+
+# Requerimiento 4 (DXY): Rate of Change de 90 días, invertido (x -1) para
+# que "dólar debilitándose" apunte en la misma dirección visual que
+# "liquidez aumentando" (ambos favorecen a Bitcoin).
+DXY_ROC_WINDOW_DAYS = 90
+
+# Requerimiento 5 (MVRV Z-Score): endpoint público de BGeometrics
+# (bitcoin-data.com) para métricas on-chain de Bitcoin.
+#
+# ACTUALIZACIÓN (Directriz 2 - Integración del Token de BGeometrics): el
+# usuario ya cuenta con su propia API key. Se sigue leyendo primero desde
+# la variable de entorno BGEOMETRICS_API_KEY (mismo criterio que
+# FRED_API_KEY arriba); si no existe, se usa el valor entregado por el
+# usuario como respaldo para que la app funcione sin configuración
+# adicional. Antes de compartir o subir este proyecto a un repositorio
+# público, se recomienda eliminar el valor hardcodeado y definir solo la
+# variable de entorno.
+MVRV_ZSCORE_API_URL = "https://bitcoin-data.com/v1/mvrv-zscore"
+BGEOMETRICS_API_KEY = os.environ.get("BGEOMETRICS_API_KEY", "UUST4LgdZI")
+
+# ACTUALIZACIÓN (Directriz 3 - Cache local del MVRV Z-Score): se guarda el
+# último DataFrame exitoso en un CSV local, en una carpeta "cache" junto al
+# resto del proyecto, para no agotar el límite de peticiones de la API key
+# cada vez que el usuario mueve el gráfico o recarga la interfaz.
+MVRV_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+MVRV_CACHE_FILE_PATH = os.path.join(MVRV_CACHE_DIR, "mvrv_zscore_cache.csv")
+# Mientras el cache tenga menos de esta antigüedad (segundos), la app lo lee
+# directo desde disco y NO dispara una petición HTTP nueva. Mismo criterio
+# que el TTL de 30 min ya usado por @st.cache_data en app.py.
+MVRV_CACHE_TTL_SECONDS = 1800
+
+# Requerimiento 6 (Alerta de Compra Macro): umbrales de la señal compuesta.
+#   a) Z-Score de Liquidez Global (Indice_Global_Final, ya calculado por
+#      build_combined_global_liquidity_index) en su cuartil inferior.
+#      Un Z-Score < -1.0 deja aproximadamente el 16% de las observaciones
+#      más bajas bajo una distribución normal estándar - un proxy robusto
+#      y ampliamente usado en la práctica institucional para "cuartil
+#      inferior" cuando no se dispone de suficiente historia para
+#      calcular percentiles empíricos exactos.
+#   b) MVRV Z-Score < 0.1 (zona de capitulación histórica, umbral
+#      estándar de la métrica original de Mahmudov/Puell).
+LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD = -1.0
+MVRV_CAPITULATION_THRESHOLD = 0.1

@@ -1,4 +1,3 @@
-
 """
 Dashboard macroeconómico interactivo para análisis de liquidez global,
 Bitcoin y Solana.
@@ -6,7 +5,7 @@ Bitcoin y Solana.
 Ejecución:
     streamlit run app.py
 """
-import math_processor
+
 import json
 import logging
 from datetime import timedelta, date
@@ -28,13 +27,25 @@ from config import (
     LAG_DECELERATORS,
     LIQUIDITY_BASE_COMPONENTS,
     LIQUIDITY_REGION_COMPONENTS,
+    LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    MVRV_CAPITULATION_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    STLFSI_PANIC_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    STLFSI_SHADE_COLOR_RGB,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    STLFSI_SHADE_OPACITY_HIGH,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    STLFSI_SHADE_OPACITY_LOW,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    STLFSI_STRESS_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    US10Y_SMA_DEFAULT_WEEKS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    US10Y_SMA_MAX_WEEKS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    US10Y_SMA_MIN_WEEKS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
 )
 from math_processor import build_master_dataframe, calculate_net_lag_days, recalculate_liquidity
 from advanced_liquidity import (  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     build_combined_global_liquidity_index,
+    build_macro_bitcoin_signals_view,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     build_short_term_liquidity_view,
 )
 from data_ingestion import (  # NUEVO: LIQUIDEZ AVANZADA
+    get_mvrv_zscore_history,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     get_stablecoin_market_cap_history,
     get_usdt_stablecoin_dominance_history,
 )
@@ -182,6 +193,36 @@ def load_stablecoin_history() -> pd.DataFrame:
             error,
         )
         return pd.DataFrame(columns=["Date", "Stablecoin_MCap_USD"])
+
+
+# NUEVO: PANEL MACRO-BITCOIN AVANZADO - historial del MVRV Z-Score,
+# cacheado por separado (fuente distinta a FRED/Yahoo, con su propia
+# cadencia de fallos, igual criterio que load_stablecoin_history).
+#
+# ACTUALIZACIÓN (Trazabilidad de Datos Total): ahora devuelve también los
+# metadatos de origen (fuente_datos, fecha_actualizacion) que entrega
+# get_mvrv_zscore_history(), para que el Health Check de la pestaña pueda
+# mostrar el estado REAL del dato (API Directa / Caché Local / Sin Datos)
+# en vez de depender del diccionario global DATA_HEALTH.
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_mvrv_zscore_history() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Descarga (con caché de 30 min) el historial del MVRV Z-Score de
+    Bitcoin vía la API de BGeometrics, junto con sus metadatos de
+    trazabilidad (fuente_datos y fecha_actualizacion).
+    """
+    try:
+        return get_mvrv_zscore_history()
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar historial de MVRV Z-Score. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "MVRV_Zscore"]), {
+            "fuente_datos": "Sin Datos",
+            "fecha_actualizacion": None,
+        }
 
 
 def get_peak_ranges(dataframe: pd.DataFrame) -> Iterable[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -2692,14 +2733,458 @@ como tal.
         )
 
 
+# =====================================================================
+# NUEVO: PANEL MACRO-BITCOIN AVANZADO (US10Y, STLFSI4, DXY, MVRV Z-Score)
+# =====================================================================
+# CANDADO: esta sección completa es aditiva y vive en su propia pestaña.
+# No modifica create_main_figure, create_liquidity_only_figure,
+# create_asset_only_figure, build_synced_dual_panel_figure,
+# render_synced_dual_panel_chart, build_advanced_index_synced_figure, ni
+# el bloque "🧮 Componentes de la Liquidez Global Combinada" dentro de
+# render_advanced_liquidity_tab(), que permanecen intactos.
+
+MACRO_PANEL_ROW_HEIGHT = 230  # alto por fila (px), 4 filas sincronizadas
+DATA_HEALTH_KEY_MISSING_LABEL = "ERROR - sin datos todavía"
+
+
+def _add_stlfsi_background_shading(
+    figure: go.Figure,
+    panel_dataframe: pd.DataFrame,
+    row: int,
+) -> go.Figure:
+    """
+    Requerimiento 3: sombreado de fondo (no una línea) del STLFSI4 sobre
+    el panel de Liquidez (fila `row`). Por cada semana con STLFSI4 > 0 se
+    dibuja una franja roja sutil; si además STLFSI4 > STLFSI_PANIC_THRESHOLD
+    (pánico/crisis bancaria genuina), la opacidad aumenta para destacarla.
+    Semanas con STLFSI4 <= 0 (condiciones financieras normales o laxas) no
+    se sombrean.
+    """
+    try:
+        shading_dataframe = panel_dataframe.loc[:, ["Date", "STLFSI4"]].dropna()
+        if shading_dataframe.empty:
+            return figure
+
+        shading_dataframe = shading_dataframe.sort_values(by="Date").reset_index(drop=True)
+        half_week = timedelta(days=3.5)
+
+        for _, week_row in shading_dataframe.iterrows():
+            stress_value = week_row["STLFSI4"]
+            if stress_value <= STLFSI_STRESS_THRESHOLD:
+                continue
+
+            opacity = (
+                STLFSI_SHADE_OPACITY_HIGH
+                if stress_value > STLFSI_PANIC_THRESHOLD
+                else STLFSI_SHADE_OPACITY_LOW
+            )
+
+            figure.add_vrect(
+                x0=week_row["Date"] - half_week,
+                x1=week_row["Date"] + half_week,
+                fillcolor=f"rgba({STLFSI_SHADE_COLOR_RGB}, {opacity})",
+                line_width=0,
+                layer="below",
+                row=row,
+                col=1,
+            )
+
+        return figure
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al aplicar sombreado de STLFSI4. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return figure
+
+
+def build_macro_signals_synced_figure(
+    panel_dataframe: pd.DataFrame,
+    asset_label: str,
+    us10y_sma_weeks: int,
+) -> go.Figure:
+    """
+    Requerimiento 1: gráfico principal del Panel Macro-Bitcoin Avanzado,
+    dividido en 4 sub-paneles verticales que comparten el mismo eje X
+    (Date), con zoom/pan perfectamente sincronizado entre filas gracias a
+    `shared_xaxes=True` de Plotly (las filas quedan enlazadas mediante
+    ejes "matches", comportamiento nativo - no requiere JavaScript
+    adicional).
+
+    Fila 1: Liquidez Global (Z-Score) vs. Precio del activo, con el
+            sombreado de fondo del STLFSI4 (Requerimiento 3) y los
+            marcadores de la Señal de Compra Macro (Requerimiento 6).
+    Fila 2: US10Y + SMA (Requerimiento 2).
+    Fila 3: DXY - RoC 90 días invertido (Requerimiento 4).
+    Fila 4: MVRV Z-Score de Bitcoin (Requerimiento 5).
+    """
+    try:
+        if panel_dataframe.empty:
+            raise ValueError(
+                "No hay datos suficientes para construir el Panel "
+                "Macro-Bitcoin Avanzado."
+            )
+
+        figure = make_subplots(
+            rows=4,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.035,
+            row_heights=[0.32, 0.22, 0.22, 0.24],
+            specs=[
+                [{"secondary_y": True}],
+                [{"secondary_y": False}],
+                [{"secondary_y": False}],
+                [{"secondary_y": False}],
+            ],
+            subplot_titles=(
+                "Liquidez Global (Z-Score) vs. Precio  |  fondo rojo = estrés financiero (STLFSI4)",
+                "US10Y — Rendimiento del Tesoro a 10 años (%)",
+                "DXY — Fortaleza del Dólar (RoC 90d invertido)",
+                "MVRV Z-Score de Bitcoin (on-chain)",
+            ),
+        )
+
+        # --- Fila 1: Liquidez Global (Z-Score) + Precio del activo ---
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["Liquidez_Global_Zscore"],
+                mode="lines",
+                name="Liquidez Global (Z-Score)",
+                line={"color": "#00CC96", "width": 2.5},
+                hovertemplate=(
+                    "<b>Liquidez Global (Z-Score)</b><br>"
+                    "Semana: %{x|%d-%m-%Y}<br>Z-Score: %{y:.2f}<extra></extra>"
+                ),
+            ),
+            row=1, col=1, secondary_y=False,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["BTC_Close"],
+                mode="lines",
+                name=asset_label,
+                line={"color": "#F59E0B", "width": 1.8},
+                opacity=0.85,
+                hovertemplate=(
+                    f"<b>{asset_label}</b><br>"
+                    "Semana: %{x|%d-%m-%Y}<br>Precio: $%{y:,.0f}<extra></extra>"
+                ),
+            ),
+            row=1, col=1, secondary_y=True,
+        )
+
+        figure = _add_stlfsi_background_shading(figure, panel_dataframe, row=1)
+
+        # Requerimiento 6: marcador verde en la base del gráfico cuando la
+        # Señal de Compra Macro está activa esa semana.
+        signal_dataframe = panel_dataframe.loc[panel_dataframe["Senal_Compra_Macro"] == True]  # noqa: E712
+        if not signal_dataframe.empty:
+            liquidity_min = pd.to_numeric(
+                panel_dataframe["Liquidez_Global_Zscore"], errors="coerce"
+            ).min()
+            marker_y_base = (liquidity_min if pd.notna(liquidity_min) else 0.0) - 0.3
+            figure.add_trace(
+                go.Scatter(
+                    x=signal_dataframe["Date"],
+                    y=[marker_y_base] * len(signal_dataframe),
+                    mode="markers",
+                    name="Señal de Compra Macro",
+                    marker={
+                        "symbol": "triangle-up",
+                        "size": 14,
+                        "color": "#39FF14",
+                        "line": {"color": "#0E1117", "width": 1},
+                    },
+                    hovertemplate=(
+                        "<b>🟢 Señal de Compra Macro</b><br>"
+                        "Semana: %{x|%d-%m-%Y}<br>"
+                        "Liquidez en cuartil inferior + MVRV en capitulación"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=1, col=1, secondary_y=False,
+            )
+
+        # --- Fila 2: US10Y + SMA ---
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["US10Y"],
+                mode="lines",
+                name="US10Y (10Y Treasury)",
+                line={"color": "#38BDF8", "width": 1.5},
+                opacity=0.6,
+                hovertemplate="US10Y: %{y:.2f}%<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["US10Y_SMA"],
+                mode="lines",
+                name=f"US10Y SMA ({us10y_sma_weeks}sem)",
+                line={"color": "#0EA5E9", "width": 2.5},
+                hovertemplate="US10Y SMA: %{y:.2f}%<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+
+        # --- Fila 3: DXY RoC 90d invertido ---
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["DXY_RoC90_Inv"],
+                mode="lines",
+                name="DXY RoC 90d (invertido)",
+                line={"color": "#A855F7", "width": 2},
+                fill="tozeroy",
+                fillcolor="rgba(168, 85, 247, 0.12)",
+                hovertemplate="DXY RoC 90d Inv: %{y:.2f}%<extra></extra>",
+            ),
+            row=3, col=1,
+        )
+        figure.add_hline(y=0, line_color="rgba(255,255,255,0.25)", line_width=1, row=3, col=1)
+
+        # --- Fila 4: MVRV Z-Score ---
+        figure.add_trace(
+            go.Scatter(
+                x=panel_dataframe["Date"],
+                y=panel_dataframe["MVRV_Zscore"],
+                mode="lines",
+                name="MVRV Z-Score (BTC)",
+                line={"color": "#FB7185", "width": 2.2},
+                hovertemplate="MVRV Z-Score: %{y:.2f}<extra></extra>",
+            ),
+            row=4, col=1,
+        )
+        figure.add_hline(
+            y=MVRV_CAPITULATION_THRESHOLD,
+            line_color="#39FF14",
+            line_dash="dot",
+            line_width=1.5,
+            annotation_text="Capitulación (<0.1)",
+            annotation_position="bottom right",
+            row=4, col=1,
+        )
+
+        figure.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0E1117",
+            plot_bgcolor="#0E1117",
+            height=MACRO_PANEL_ROW_HEIGHT * 4,
+            hovermode="x unified",
+            dragmode="pan",
+            showlegend=True,
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.03,
+                "xanchor": "right",
+                "x": 1,
+                "font": {"size": 10},
+            },
+            margin={"l": 10, "r": 10, "t": 90, "b": 10},
+        )
+
+        figure.update_xaxes(showgrid=False, fixedrange=False)
+        figure.update_xaxes(title_text="Fecha (semanal, cierre viernes)", row=4, col=1)
+
+        figure.update_yaxes(
+            title_text="Liquidez (Z-Score)", row=1, col=1, secondary_y=False,
+            gridcolor="rgba(255, 255, 255, 0.08)", fixedrange=False,
+        )
+        figure.update_yaxes(
+            title_text=f"Precio {asset_label} (USD)", row=1, col=1, secondary_y=True,
+            showgrid=False, tickprefix="$", fixedrange=False,
+        )
+        figure.update_yaxes(title_text="%", row=2, col=1, fixedrange=False,
+                             gridcolor="rgba(255, 255, 255, 0.08)")
+        figure.update_yaxes(title_text="% (invertido)", row=3, col=1, fixedrange=False,
+                             gridcolor="rgba(255, 255, 255, 0.08)")
+        figure.update_yaxes(title_text="Z-Score", row=4, col=1, fixedrange=False,
+                             gridcolor="rgba(255, 255, 255, 0.08)")
+
+        return figure
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al construir el Panel Macro-Bitcoin Avanzado. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        fallback_figure = go.Figure()
+        fallback_figure.update_layout(
+            template="plotly_dark",
+            title="No fue posible construir el Panel Macro-Bitcoin Avanzado",
+            height=500,
+        )
+        return fallback_figure
+
+
+def render_macro_signals_tab() -> None:
+    """
+    Renderiza la nueva pestaña "Señales Macro Avanzadas": US10Y, STLFSI4,
+    DXY (RoC 90d invertido) y MVRV Z-Score de Bitcoin, en 4 sub-paneles
+    verticales sincronizados en el eje X (Requerimiento 1), más la Señal
+    de Compra Macro (Requerimiento 6).
+    """
+    try:
+        st.subheader("🧭 Señales Macro Avanzadas (US10Y · STLFSI4 · DXY · MVRV)")
+        st.caption(
+            "Panel independiente y sincronizado: arrastra o haz zoom en "
+            "cualquiera de las 4 filas y las demás se mueven exactamente "
+            "igual (mismo eje de tiempo). No reemplaza ni modifica los "
+            "gráficos del Panel Principal ni de Liquidez Avanzada."
+        )
+
+        asset_label = "Bitcoin (BTC-USD)"
+
+        sma_col, _ = st.columns([1, 3])
+        with sma_col:
+            us10y_sma_weeks = st.slider(
+                "SMA de US10Y (semanas)",
+                min_value=US10Y_SMA_MIN_WEEKS,
+                max_value=US10Y_SMA_MAX_WEEKS,
+                value=US10Y_SMA_DEFAULT_WEEKS,
+                step=1,
+                key="macro_us10y_sma_weeks",
+                help="Media móvil de mediano/largo plazo para suavizar el ruido diario del US10Y.",
+            )
+
+        with st.spinner("Descargando y alineando datos macro (FRED) y on-chain (MVRV)..."):
+            master_dataframe, health_report = load_master_dataframe()
+            mvrv_dataframe, mvrv_metadata = load_mvrv_zscore_history()
+
+        if master_dataframe.empty:
+            st.error(
+                "No fue posible construir el DataFrame Maestro. Revisa el "
+                "Panel Principal para más detalle."
+            )
+            return
+
+        panel_dataframe = build_macro_bitcoin_signals_view(
+            master_dataframe=master_dataframe,
+            mvrv_dataframe=mvrv_dataframe,
+            us10y_sma_weeks=us10y_sma_weeks,
+        )
+
+        if panel_dataframe.empty:
+            st.warning(
+                "Todavía no hay suficiente historial para calcular el "
+                "Panel Macro-Bitcoin Avanzado (US10Y, STLFSI4 y DXY "
+                "necesitan al menos 90 días de datos previos)."
+            )
+            return
+
+        signals_count = int(panel_dataframe["Senal_Compra_Macro"].sum())
+        if signals_count > 0:
+            last_signal_date = panel_dataframe.loc[
+                panel_dataframe["Senal_Compra_Macro"] == True, "Date"  # noqa: E712
+            ].max()
+            st.success(
+                f"🟢 {signals_count} señal(es) de Compra Macro detectadas en "
+                f"el historial. Última: {last_signal_date.strftime('%d-%m-%Y')}."
+            )
+        else:
+            st.info(
+                "Sin señales de Compra Macro activas en el historial "
+                "disponible con los umbrales actuales."
+            )
+
+        synced_figure = build_macro_signals_synced_figure(
+            panel_dataframe=panel_dataframe,
+            asset_label=asset_label,
+            us10y_sma_weeks=us10y_sma_weeks,
+        )
+
+        st.plotly_chart(
+            synced_figure,
+            use_container_width=True,
+            config=TRADINGVIEW_PLOTLY_CONFIG,
+        )
+
+        with st.expander("📡 Estado de las fuentes de esta pestaña (Health Check)"):
+            relevant_sources = {
+                key: value
+                for key, value in health_report.items()
+                if key in {"DGS10", "STLFSI4", "DX-Y.NYB"}
+            }
+
+            if not relevant_sources:
+                st.write("Sin información de salud disponible todavía.")
+            for source_name, status in sorted(relevant_sources.items()):
+                if status == "OK":
+                    st.success(f"{source_name}: OK")
+                elif isinstance(status, str) and status.startswith("OK"):
+                    st.warning(f"{source_name}: {status}")
+                else:
+                    st.error(f"{source_name}: {status}")
+
+            # ACTUALIZACIÓN (Trazabilidad de Datos Total): el estado del
+            # MVRV Z-Score YA NO se lee del diccionario global
+            # health_report/DATA_HEALTH - ese diccionario podía quedar
+            # desactualizado según el orden de llamadas entre
+            # load_master_dataframe() (que limpia DATA_HEALTH al iniciar)
+            # y load_mvrv_zscore_history() (que se llama después), lo cual
+            # producía el falso negativo "ERROR" reportado aunque el dato
+            # sí se hubiera cargado bien vía caché. Ahora se lee siempre
+            # de los metadatos reales que devuelve get_mvrv_zscore_history:
+            # fuente_datos + fecha_actualizacion. Nunca se fuerza "OK" si
+            # no hay datos.
+            mvrv_source = mvrv_metadata.get("fuente_datos", "Sin Datos")
+            mvrv_updated_at = mvrv_metadata.get("fecha_actualizacion")
+            mvrv_has_data = mvrv_dataframe is not None and not mvrv_dataframe.empty
+            timestamp_label = (
+                mvrv_updated_at.strftime("%d-%m-%Y %H:%M:%S")
+                if mvrv_updated_at is not None
+                else "desconocida"
+            )
+
+            if mvrv_has_data and mvrv_source == "API Directa":
+                st.success(
+                    "MVRV_Zscore (BGeometrics): OK - Datos extraídos de la "
+                    f"API (Última actualización: {timestamp_label})"
+                )
+            elif mvrv_has_data and mvrv_source == "Caché Local":
+                st.warning(
+                    "MVRV_Zscore (BGeometrics): OK - Usando Caché Local "
+                    f"(Última actualización: {timestamp_label})"
+                )
+            else:
+                st.error(
+                    "MVRV_Zscore (BGeometrics): ERROR - Sin datos (Fallo "
+                    "en API y Caché)"
+                )
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error crítico en la pestaña de Señales Macro Avanzadas. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        st.error(
+            "Ocurrió un error crítico al ejecutar la pestaña de Señales "
+            "Macro Avanzadas. Consulta la consola para ver el detalle técnico."
+        )
+
+
 def main() -> None:
     """
-    Punto de entrada de la aplicación: organiza el Panel Principal y la
-    nueva pestaña de Liquidez Avanzada como pestañas independientes del
-    mismo programa (NUEVO: LIQUIDEZ AVANZADA).
+    Punto de entrada de la aplicación: organiza el Panel Principal, la
+    pestaña de Liquidez Avanzada y la nueva pestaña de Señales Macro
+    Avanzadas como pestañas independientes del mismo programa (NUEVO:
+    LIQUIDEZ AVANZADA / NUEVO: PANEL MACRO-BITCOIN AVANZADO).
     """
-    tab_main, tab_advanced = st.tabs(
-        ["📊 Panel Principal", "🧪 Liquidez Avanzada"]
+    tab_main, tab_advanced, tab_macro_signals = st.tabs(
+        ["📊 Panel Principal", "🧪 Liquidez Avanzada", "🧭 Señales Macro Avanzadas"]
     )
 
     with tab_main:
@@ -2707,6 +3192,9 @@ def main() -> None:
 
     with tab_advanced:
         render_advanced_liquidity_tab()
+
+    with tab_macro_signals:
+        render_macro_signals_tab()
 
 
 if __name__ == "__main__":

@@ -3,19 +3,27 @@ Módulo de descarga, validación y limpieza de datos desde FRED y Yahoo Finance.
 """
 
 import logging
-from typing import Dict, List, Optional
+import os
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 import yfinance as yf
 
 from config import (
+    BGEOMETRICS_API_KEY,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     COINGECKO_API_KEY,
     DEFILLAMA_STABLECOIN_HISTORY_URL,  # NUEVO: LIQUIDEZ AVANZADA
     DEFILLAMA_STABLECOINS_LIST_URL,  # NUEVO: LIQUIDEZ AVANZADA
     FRED_API_BASE_URL,
     FRED_API_KEY,
     FRED_SERIES,
+    MVRV_CACHE_DIR,  # ACTUALIZACIÓN: Directriz 3 - cache local MVRV
+    MVRV_CACHE_FILE_PATH,  # ACTUALIZACIÓN: Directriz 3 - cache local MVRV
+    MVRV_CACHE_TTL_SECONDS,  # ACTUALIZACIÓN: Directriz 3 - cache local MVRV
+    MVRV_ZSCORE_API_URL,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     STABLECOIN_SYMBOLS_TRACKED,  # NUEVO: LIQUIDEZ AVANZADA
     YAHOO_TICKERS,
     YFINANCE_INTERVAL,
@@ -878,6 +886,395 @@ def get_usdt_stablecoin_dominance_history(
             error,
         )
         return pd.DataFrame(columns=["Date", "USDT_Stablecoin_Dominance"])
+
+
+# NUEVO: PANEL MACRO-BITCOIN AVANZADO - historial del MVRV Z-Score de
+# Bitcoin, vía la API de BGeometrics (bitcoin-data.com).
+#
+# La respuesta de BGeometrics puede llegar en más de un formato según el
+# endpoint/versión (lista de objetos {"d": fecha, "mvrvZscore": valor} o
+# variantes de nombre de clave). Este parser es deliberadamente defensivo:
+# prueba varias claves de fecha/valor conocidas y, si ninguna calza, no
+# inventa un número - devuelve un DataFrame vacío y lo refleja como ERROR
+# en el Health Check, igual que el resto del pipeline.
+_MVRV_DATE_KEYS = ("d", "date", "Date", "timestamp")
+_MVRV_VALUE_KEYS = (
+    "mvrvZscore",
+    "mvrv_zscore",
+    "mvrv_z_score",
+    "value",
+    "Value",
+    "zscore",
+)
+
+
+def _parse_mvrv_response(payload) -> pd.DataFrame:
+    """
+    Convierte la respuesta cruda (JSON ya deserializado) de la API de MVRV
+    Z-Score a un DataFrame Date/MVRV_Zscore, sin importar cuál de los
+    formatos conocidos haya devuelto el servidor.
+
+    Parameters
+    ----------
+    payload : Any
+        Contenido ya parseado (response.json()) del endpoint de MVRV.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columnas Date y MVRV_Zscore. Vacío si el formato no es reconocido.
+    """
+    try:
+        records = payload
+        if isinstance(payload, dict):
+            # Variante estilo {"data": [...]}.
+            records = payload.get("data", payload.get("results", payload))
+
+        rows = []
+
+        if isinstance(records, list) and records and isinstance(records[0], (list, tuple)):
+            # Variante [[fecha, valor], [fecha, valor], ...]
+            for entry in records:
+                if len(entry) < 2:
+                    continue
+                rows.append({"Date": entry[0], "MVRV_Zscore": entry[1]})
+
+        elif isinstance(records, list):
+            # Variante lista de diccionarios.
+            for entry in records:
+                if not isinstance(entry, dict):
+                    continue
+                date_value = next(
+                    (entry[key] for key in _MVRV_DATE_KEYS if key in entry),
+                    None,
+                )
+                score_value = next(
+                    (entry[key] for key in _MVRV_VALUE_KEYS if key in entry),
+                    None,
+                )
+                if date_value is None or score_value is None:
+                    continue
+                rows.append({"Date": date_value, "MVRV_Zscore": score_value})
+
+        if not rows:
+            return pd.DataFrame(columns=["Date", "MVRV_Zscore"])
+
+        parsed_dataframe = pd.DataFrame(rows)
+        parsed_dataframe["Date"] = pd.to_datetime(
+            parsed_dataframe["Date"], errors="coerce"
+        )
+        parsed_dataframe["MVRV_Zscore"] = pd.to_numeric(
+            parsed_dataframe["MVRV_Zscore"], errors="coerce"
+        )
+        parsed_dataframe = parsed_dataframe.dropna(subset=["Date", "MVRV_Zscore"])
+        parsed_dataframe = parsed_dataframe.drop_duplicates(subset=["Date"], keep="last")
+        parsed_dataframe = parsed_dataframe.sort_values(by="Date").reset_index(drop=True)
+
+        return parsed_dataframe
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al interpretar la respuesta del MVRV Z-Score. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "MVRV_Zscore"])
+
+
+# =====================================================================
+# Directriz 3 (turno anterior): cache local en disco para el MVRV Z-Score.
+# =====================================================================
+def _load_mvrv_cache_from_disk() -> Optional[pd.DataFrame]:
+    """
+    Lee el cache local en disco del MVRV Z-Score, si existe y es válido.
+
+    Returns
+    -------
+    Optional[pd.DataFrame]
+        DataFrame con columnas Date/MVRV_Zscore, o None si el archivo no
+        existe, está corrupto o no tiene registros aprovechables.
+    """
+    try:
+        if not os.path.isfile(MVRV_CACHE_FILE_PATH):
+            return None
+
+        cached_dataframe = pd.read_csv(MVRV_CACHE_FILE_PATH)
+
+        if "Date" not in cached_dataframe.columns or "MVRV_Zscore" not in cached_dataframe.columns:
+            LOGGER.warning(
+                "El archivo de cache de MVRV Z-Score no tiene el formato esperado; se ignora."
+            )
+            return None
+
+        cached_dataframe["Date"] = pd.to_datetime(cached_dataframe["Date"], errors="coerce")
+        cached_dataframe["MVRV_Zscore"] = pd.to_numeric(
+            cached_dataframe["MVRV_Zscore"], errors="coerce"
+        )
+        cached_dataframe = cached_dataframe.dropna(subset=["Date", "MVRV_Zscore"])
+
+        if cached_dataframe.empty:
+            return None
+
+        cached_dataframe = cached_dataframe.sort_values(by="Date").reset_index(drop=True)
+
+        return cached_dataframe
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al leer el cache local del MVRV Z-Score. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return None
+
+
+def _save_mvrv_cache_to_disk(dataframe: pd.DataFrame) -> None:
+    """
+    Guarda en disco (CSV) el último DataFrame exitoso del MVRV Z-Score, para
+    que las próximas cargas puedan leer desde ahí sin golpear la API.
+    """
+    try:
+        if dataframe is None or dataframe.empty:
+            return
+
+        os.makedirs(MVRV_CACHE_DIR, exist_ok=True)
+        dataframe.to_csv(MVRV_CACHE_FILE_PATH, index=False)
+
+        LOGGER.info(
+            "Cache local del MVRV Z-Score actualizado en %s. Registros: %s.",
+            MVRV_CACHE_FILE_PATH,
+            len(dataframe),
+        )
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al guardar el cache local del MVRV Z-Score. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+
+
+def _mvrv_cache_is_fresh() -> bool:
+    """
+    True si el archivo de cache existe y su antigüedad es menor a
+    MVRV_CACHE_TTL_SECONDS - en ese caso no hace falta golpear la API.
+    """
+    try:
+        if not os.path.isfile(MVRV_CACHE_FILE_PATH):
+            return False
+        file_age_seconds = time.time() - os.path.getmtime(MVRV_CACHE_FILE_PATH)
+        return file_age_seconds < MVRV_CACHE_TTL_SECONDS
+    except Exception as error:
+        LOGGER.exception(
+            "Error al verificar la antigüedad del cache del MVRV Z-Score. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return False
+
+
+def _get_mvrv_cache_timestamp() -> Optional[datetime]:
+    """
+    Devuelve la fecha/hora real en que se escribió el archivo de cache del
+    MVRV Z-Score en disco (su mtime), o None si el archivo no existe.
+
+    ACTUALIZACIÓN (Trazabilidad de Datos Total - Directriz 1): este
+    timestamp es el que se expone como `fecha_actualizacion` cuando el
+    dato proviene del Caché Local, para que la UI pueda mostrar
+    exactamente cuándo se guardó por última vez (no un valor inventado).
+    """
+    try:
+        if not os.path.isfile(MVRV_CACHE_FILE_PATH):
+            return None
+        return datetime.fromtimestamp(os.path.getmtime(MVRV_CACHE_FILE_PATH))
+    except Exception as error:
+        LOGGER.exception(
+            "Error al leer la fecha de modificación del cache del MVRV "
+            "Z-Score. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return None
+
+
+def _mvrv_metadata(fuente_datos: str, fecha_actualizacion: Optional[datetime]) -> Dict[str, Any]:
+    """
+    Construye el diccionario de metadatos de trazabilidad devuelto junto
+    al DataFrame por get_mvrv_zscore_history().
+
+    Parameters
+    ----------
+    fuente_datos : str
+        "API Directa", "Caché Local" o "Sin Datos".
+    fecha_actualizacion : Optional[datetime]
+        Momento real en que se obtuvo/guardó el dato. None si no hay dato.
+    """
+    return {
+        "fuente_datos": fuente_datos,
+        "fecha_actualizacion": fecha_actualizacion,
+    }
+
+
+def get_mvrv_zscore_history(
+    api_key: str = BGEOMETRICS_API_KEY,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Descarga el historial del MVRV Z-Score de Bitcoin desde la API de
+    BGeometrics (bitcoin-data.com), usando el token del usuario.
+
+    El token se inyecta de dos formas válidas a la vez (documentación de
+    BGeometrics): como parámetro "token" en la URL y como encabezado
+    "Authorization: Bearer <token>".
+
+    Antes de golpear la API, se revisa si hay un cache local "fresco"
+    (menos de MVRV_CACHE_TTL_SECONDS de antigüedad) - si lo hay, se sirve
+    directo desde disco y NO se hace una petición HTTP nueva. Si la
+    petición HTTP falla por cualquier motivo, se intenta servir el cache
+    local como resguardo antes de devolver un DataFrame vacío.
+
+    ACTUALIZACIÓN (Trazabilidad de Datos Total): esta función YA NO
+    devuelve solo el DataFrame. Devuelve una tupla (DataFrame, metadata),
+    donde metadata trae SIEMPRE el origen real del dato:
+        - "fuente_datos": "API Directa" | "Caché Local" | "Sin Datos"
+        - "fecha_actualizacion": datetime real de cuándo se obtuvo/guardó
+          el dato (None si no hay dato disponible).
+    Esto es lo que consume app.py para pintar el Health Check de forma
+    honesta, sin depender del diccionario global DATA_HEALTH (que podía
+    quedar desactualizado por el orden de llamadas entre
+    load_master_dataframe() y load_mvrv_zscore_history(), produciendo el
+    falso negativo "ERROR" reportado). DATA_HEALTH se sigue actualizando
+    igual que antes, solo que ya no es la fuente de verdad para la UI.
+
+    Parameters
+    ----------
+    api_key : str
+        Token de BGeometrics (BGEOMETRICS_API_KEY en config.py).
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, Dict[str, Any]]
+        DataFrame con columnas Date y MVRV_Zscore (vacío únicamente si
+        tanto la API como el cache local fallan - nunca se inventa un
+        valor), y el diccionario de metadatos descrito arriba.
+    """
+    try:
+        if _mvrv_cache_is_fresh():
+            cached_dataframe = _load_mvrv_cache_from_disk()
+            if cached_dataframe is not None and not cached_dataframe.empty:
+                DATA_HEALTH["MVRV_Zscore"] = "OK (cache local)"
+                cache_timestamp = _get_mvrv_cache_timestamp()
+                LOGGER.info(
+                    "MVRV Z-Score servido desde cache local (fresco). Registros: %s.",
+                    len(cached_dataframe),
+                )
+                return cached_dataframe, _mvrv_metadata("Caché Local", cache_timestamp)
+
+        headers: Dict[str, str] = {}
+        params: Dict[str, str] = {}
+        if isinstance(api_key, str) and api_key.strip():
+            clean_key = api_key.strip()
+            headers["Authorization"] = f"Bearer {clean_key}"
+            params["token"] = clean_key
+
+        LOGGER.info("Iniciando descarga del MVRV Z-Score (BGeometrics).")
+
+        response = requests.get(
+            MVRV_ZSCORE_API_URL,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        result_dataframe = _parse_mvrv_response(payload)
+
+        if result_dataframe.empty:
+            raise ValueError(
+                "La respuesta del MVRV Z-Score no contenía registros "
+                "reconocibles."
+            )
+
+        _mark_health("MVRV_Zscore", ok=True)
+        _save_mvrv_cache_to_disk(result_dataframe)
+
+        fetched_at = datetime.now()
+
+        LOGGER.info(
+            "Historial de MVRV Z-Score descargado. Registros: %s.",
+            len(result_dataframe),
+        )
+
+        return result_dataframe, _mvrv_metadata("API Directa", fetched_at)
+
+    except requests.exceptions.HTTPError as error:
+        status_code = getattr(error.response, "status_code", "desconocido")
+        detail = (
+            "token inválido o no autorizado (revisa BGEOMETRICS_API_KEY)"
+            if status_code in (401, 403)
+            else f"HTTP {status_code}"
+        )
+        LOGGER.exception(
+            "Error HTTP al descargar MVRV Z-Score. Detalle: %s", error
+        )
+        return _fallback_to_mvrv_cache(detail)
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al descargar el MVRV Z-Score. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return _fallback_to_mvrv_cache(type(error).__name__)
+
+
+def _fallback_to_mvrv_cache(error_detail: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Si la petición HTTP del MVRV Z-Score falla, se intenta servir el
+    último DataFrame exitoso guardado en el cache local (aunque esté
+    vencido) antes de devolver un DataFrame vacío.
+
+    Parameters
+    ----------
+    error_detail : str
+        Motivo del fallo de la API, solo para fines de Health Check/log.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, Dict[str, Any]]
+        El cache local (fuente_datos="Caché Local") si existe, o un
+        DataFrame vacío con fuente_datos="Sin Datos" si tanto la API como
+        el cache fallan.
+    """
+    try:
+        cached_dataframe = _load_mvrv_cache_from_disk()
+        if cached_dataframe is not None and not cached_dataframe.empty:
+            DATA_HEALTH["MVRV_Zscore"] = (
+                f"OK (cache local - la API falló: {error_detail})"
+            )
+            cache_timestamp = _get_mvrv_cache_timestamp()
+            LOGGER.warning(
+                "La API de MVRV Z-Score falló (%s); se sirvió el cache "
+                "local con %s registros en su lugar.",
+                error_detail,
+                len(cached_dataframe),
+            )
+            return cached_dataframe, _mvrv_metadata("Caché Local", cache_timestamp)
+
+        _mark_health("MVRV_Zscore", ok=False, detail=error_detail)
+        return pd.DataFrame(columns=["Date", "MVRV_Zscore"]), _mvrv_metadata("Sin Datos", None)
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error inesperado en el fallback de cache del MVRV Z-Score. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        _mark_health("MVRV_Zscore", ok=False, detail="fallback de cache falló")
+        return pd.DataFrame(columns=["Date", "MVRV_Zscore"]), _mvrv_metadata("Sin Datos", None)
 
 
 if __name__ == "__main__":

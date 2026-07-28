@@ -59,6 +59,12 @@ FRED_COLUMN_MAPPING: Dict[str, str] = {
     # tal como se pidió explícitamente para este cálculo.
     "US_TREASURY_ACCOUNT_WDTGAL": "WDTGAL",
     "EUR_USD_FRED": "DEXUSEU_FRED",
+    # NUEVO: PANEL MACRO-BITCOIN AVANZADO - se registran aquí para que
+    # _download_fred_dataframes() las descargue, alinee (ffill diario) y
+    # fusione exactamente igual que el resto de series FRED, sin tocar
+    # ninguna función existente.
+    "US_10Y_TREASURY": "US10Y",
+    "FINANCIAL_STRESS_INDEX": "STLFSI4",
 }
 
 YAHOO_COLUMN_MAPPING: Dict[str, str] = {
@@ -87,6 +93,8 @@ MASTER_COLUMNS: List[str] = [
     "JPNASSETS",  # ACTUALIZACIÓN PARCHE
     "WDTGAL",  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     "DEXUSEU_FRED",  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
+    "US10Y",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    "STLFSI4",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     "EURUSD",
     "CNYUSD",
     "JPYUSD",  # ACTUALIZACIÓN PARCHE
@@ -239,6 +247,92 @@ def _normalize_dates(dataframe: pd.DataFrame) -> pd.DataFrame:
         return _create_empty_dataframe(["Date"])
 
 
+# =====================================================================
+# ACTUALIZACIÓN (Directriz 1 - Alineación temporal estricta desde la raíz)
+# =====================================================================
+# Apertura PARCIAL y controlada del "Candado Estricto" del gráfico
+# "Componentes de la Liquidez Global Combinada": esta función NO cambia
+# colores, nombres ni disposición de ningún gráfico, y NO modifica
+# build_combined_global_liquidity_index() ni ninguna fórmula existente en
+# advanced_liquidity.py. Solo mejora la PUREZA del dato de entrada: cada
+# serie individual (WALCL, ECBASSET, DEXUSEU, etc.) se reindexa a un
+# calendario diario continuo y se propaga hacia adelante (ffill) de forma
+# INDEPENDIENTE, en la raíz (este módulo de ingesta/procesamiento), antes
+# de unirse con las demás. Así todas las variables del programa - tanto
+# el gráfico original como los sub-paneles nuevos - se alimentan de datos
+# continuos y sin huecos NaN desde el origen.
+#
+# No se inventa historia antes de la primera fecha real de cada serie: el
+# reindexado solo cubre el rango [primera fecha, última fecha] que la
+# propia fuente ya reportó.
+def _reindex_daily_and_ffill(
+    dataframe: pd.DataFrame,
+    value_column: str,
+) -> pd.DataFrame:
+    """
+    Reindexa una serie individual ya limpia a un calendario diario continuo
+    (entre su propia primera y última fecha) y aplica ffill sobre los
+    huecos internos.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        Serie ya preparada, con columnas Date y `value_column`.
+    value_column : str
+        Nombre de la columna de valor a reindexar/propagar.
+
+    Returns
+    -------
+    pd.DataFrame
+        Serie con columnas Date y `value_column`, diaria y continua. Si la
+        entrada está vacía o inválida, se devuelve sin modificar.
+    """
+    try:
+        if dataframe.empty or value_column not in dataframe.columns:
+            return dataframe
+
+        working = dataframe.dropna(subset=["Date", value_column]).copy()
+        if working.empty:
+            return dataframe
+
+        working = working.sort_values(by="Date")
+        working = working.drop_duplicates(subset=["Date"], keep="last")
+
+        full_daily_index = pd.date_range(
+            start=working["Date"].min(),
+            end=working["Date"].max(),
+            freq="D",
+        )
+
+        reindexed_dataframe = (
+            working.set_index("Date")[[value_column]]
+            .reindex(full_daily_index)
+            .ffill()
+            .rename_axis("Date")
+            .reset_index()
+        )
+
+        LOGGER.info(
+            "Directriz 1 - serie %s reindexada a calendario diario "
+            "continuo + ffill en la raíz. Filas: %s -> %s.",
+            value_column,
+            len(working),
+            len(reindexed_dataframe),
+        )
+
+        return reindexed_dataframe
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al reindexar/ffillear en la raíz la serie %s. "
+            "Tipo: %s. Detalle: %s",
+            value_column,
+            type(error).__name__,
+            error,
+        )
+        return dataframe
+
+
 def _prepare_fred_series(
     dataframe: pd.DataFrame,
     output_column: str,
@@ -285,6 +379,13 @@ def _prepare_fred_series(
         prepared_dataframe = _normalize_dates(prepared_dataframe)
         prepared_dataframe = prepared_dataframe.dropna(subset=[output_column])
         prepared_dataframe = prepared_dataframe.reset_index(drop=True)
+
+        # ACTUALIZACIÓN (Directriz 1): ffill + reindexado diario continuo
+        # aplicado de forma independiente a ESTA serie individual, en la
+        # raíz, antes de unirse con las demás en _outer_merge_and_align.
+        prepared_dataframe = _reindex_daily_and_ffill(
+            prepared_dataframe, output_column
+        )
 
         LOGGER.info(
             "Serie FRED preparada: %s. Registros válidos: %s.",
@@ -386,6 +487,17 @@ def _prepare_yahoo_close_series(
         prepared_dataframe = _normalize_dates(prepared_dataframe)
         prepared_dataframe = prepared_dataframe.dropna(subset=[output_column])
         prepared_dataframe = prepared_dataframe.reset_index(drop=True)
+
+        # ACTUALIZACIÓN (Directriz 1): ffill + reindexado diario continuo
+        # en la raíz, igual que las series FRED - EXCEPTO para los precios
+        # cripto (BTC/SOL/USDT), que deben conservar únicamente fechas con
+        # precio real (mismo criterio ya documentado en
+        # _outer_merge_and_align: "sólo se mantienen fechas con precio
+        # real de Bitcoin").
+        if output_column not in CRYPTO_PRICE_COLUMNS:
+            prepared_dataframe = _reindex_daily_and_ffill(
+                prepared_dataframe, output_column
+            )
 
         LOGGER.info(
             "Serie Yahoo Finance preparada: %s. Registros válidos: %s.",
@@ -559,6 +671,15 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     El forward fill se limita a datos macroeconómicos y de mercado tradicional.
     Los precios cripto se conservan sin propagación para que sólo se mantengan
     fechas con precio real de Bitcoin.
+
+    NOTA (Directriz 1): cada serie individual ya llega aquí reindexada a
+    calendario diario continuo y ffilleada de forma independiente desde
+    _prepare_fred_series/_prepare_yahoo_close_series (la raíz). Este ffill
+    posterior al merge se conserva como red de seguridad adicional para
+    cubrir cualquier fecha que solo exista en OTRA serie del merge (ej. un
+    feriado bancario de la Fed que sí sea día hábil para el BCE); no
+    cambia el comportamiento previo, solo queda reforzado con datos de
+    entrada más puros.
 
     Parameters
     ----------
@@ -1163,6 +1284,12 @@ def build_master_dataframe(
     en lugar de solo el DataFrame, para alimentar el panel de auditoría de
     app.py (Requerimiento 5). Cualquier código que llame a esta función debe
     desempaquetar la tupla.
+
+    ACTUALIZACIÓN (Directriz 1): cada serie FRED/Yahoo (no cripto) ya llega
+    aquí reindexada a calendario diario continuo y ffilleada de forma
+    independiente desde la raíz (_prepare_fred_series /
+    _prepare_yahoo_close_series), antes del outer merge - ver comentarios
+    en ese módulo para el detalle exacto.
 
     Parameters
     ----------

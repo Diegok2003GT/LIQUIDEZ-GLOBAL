@@ -28,9 +28,15 @@ from config import (
     COMBINED_LIQUIDITY_RESAMPLE_RULE,
     COMBINED_LIQUIDITY_ROC_WINDOW_DAYS,
     COMBINED_LIQUIDITY_ZSCORE_WINDOW_WEEKS,  # CORRECCIÓN INSTITUCIONAL
+    DXY_ROC_WINDOW_DAYS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    MACRO_PANEL_RESAMPLE_RULE,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    MVRV_CAPITULATION_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     RRP_BILLIONS_TO_MILLIONS,
     SHORT_TERM_LIQUIDITY_COMPONENTS,
     SHORT_TERM_ZSCORE_WINDOW_DAYS,
+    US10Y_SMA_MAX_WEEKS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
+    US10Y_SMA_MIN_WEEKS,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
 )
 
 logging.basicConfig(
@@ -482,3 +488,232 @@ def build_short_term_liquidity_view(
             error,
         )
         return pd.DataFrame()
+
+
+# =====================================================================
+# NUEVO: PANEL MACRO-BITCOIN AVANZADO (US10Y, STLFSI4, DXY, MVRV Z-Score)
+# =====================================================================
+# CANDADO: esta sección es 100% aditiva. No modifica, llama de forma
+# distinta, ni reutiliza el estado interno de build_combined_global_
+# liquidity_index() más allá de invocarla de la misma manera en que ya lo
+# hace app.py - es decir, se lee su resultado, nunca se altera su código.
+
+MACRO_PANEL_COLUMNS: List[str] = [
+    "Date",
+    "BTC_Close",
+    "Liquidez_Global_Zscore",
+    "US10Y",
+    "US10Y_SMA",
+    "STLFSI4",
+    "DXY_RoC90_Inv",
+    "MVRV_Zscore",
+    "Senal_Compra_Macro",
+]
+
+
+def _resample_weekly_last(
+    dataframe: pd.DataFrame,
+    date_column: str,
+    value_columns: List[str],
+) -> pd.DataFrame:
+    """
+    Reagrupa una serie diaria a cadencia semanal (cierre viernes),
+    tomando el último valor real de cada semana (`.last()`), exactamente
+    la misma convención ya usada por el índice de Liquidez Global
+    Combinada. Nunca promedia ni interpola un valor sintético.
+    """
+    try:
+        if dataframe.empty:
+            return pd.DataFrame(columns=[date_column] + value_columns)
+
+        working = dataframe.loc[:, [date_column] + value_columns].copy()
+        working = working.sort_values(by=date_column).reset_index(drop=True)
+
+        weekly = (
+            working.set_index(date_column)[value_columns]
+            .resample(MACRO_PANEL_RESAMPLE_RULE)
+            .last()
+            .reset_index()
+        )
+
+        return weekly
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al reagrupar semanalmente. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=[date_column] + value_columns)
+
+
+def build_macro_bitcoin_signals_view(
+    master_dataframe: pd.DataFrame,
+    mvrv_dataframe: Optional[pd.DataFrame] = None,
+    us10y_sma_weeks: int = 20,
+) -> pd.DataFrame:
+    """
+    Construye la vista semanal sincronizada del Panel Macro-Bitcoin
+    Avanzado: US10Y (+ SMA), STLFSI4 (para sombreado de fondo), DXY con
+    Rate of Change de 90 días invertido, MVRV Z-Score de Bitcoin, y la
+    Señal de Compra Macro (Requerimiento 6).
+
+    Metodología (igual criterio que Liquidez Global Combinada):
+      - US10Y y STLFSI4: ya llegan diarios y con ffill aplicado desde
+        math_processor.py (misma alineación genérica que WALCL/WDTGAL).
+        Aquí solo se reagrupan a cierre de viernes con `.last()`.
+      - DXY: Rate of Change porcentual de 90 días calculado en la serie
+        DIARIA (para no perder resolución en la ventana móvil), invertido
+        (x -1), y luego reagrupado semanalmente con `.last()`.
+      - MVRV Z-Score: se reindexa a calendario diario continuo + ffill
+        (mismo criterio que el resto del programa) antes de reagruparse
+        semanalmente, para alinearlo con las demás series.
+      - Liquidez Global: se reutiliza Indice_Global_Final, calculado por
+        build_combined_global_liquidity_index() con los componentes por
+        defecto (WALCL, TGA, RRP, ECB activos) - esa función NO se
+        modifica, solo se invoca y se lee su resultado.
+      - Señal de Compra Macro: True cuando, en la misma semana,
+        Liquidez_Global_Zscore < LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD Y
+        MVRV_Zscore < MVRV_CAPITULATION_THRESHOLD simultáneamente.
+
+    Parameters
+    ----------
+    master_dataframe : pd.DataFrame
+        DataFrame Maestro de math_processor.py (con US10Y, STLFSI4, DXY y
+        BTC_Close ya alineados).
+    mvrv_dataframe : Optional[pd.DataFrame]
+        Resultado de data_ingestion.get_mvrv_zscore_history(). Si es None
+        o está vacío, la columna MVRV_Zscore y la Señal de Compra Macro
+        quedan en NaN/False (no se inventa un valor).
+    us10y_sma_weeks : int
+        Ventana en semanas de la SMA aplicada sobre US10Y, acotada entre
+        US10Y_SMA_MIN_WEEKS y US10Y_SMA_MAX_WEEKS.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columnas: MACRO_PANEL_COLUMNS, cadencia semanal (cierre viernes).
+    """
+    empty_result = pd.DataFrame(columns=MACRO_PANEL_COLUMNS)
+
+    try:
+        required_columns = ["Date", "US10Y", "STLFSI4", "DXY", "BTC_Close"]
+        missing_columns = [c for c in required_columns if c not in master_dataframe.columns]
+        if master_dataframe.empty or missing_columns:
+            if missing_columns:
+                LOGGER.warning(
+                    "Faltan columnas para el Panel Macro-Bitcoin Avanzado: %s.",
+                    missing_columns,
+                )
+            return empty_result
+
+        working = master_dataframe.loc[:, required_columns].copy()
+        working = working.sort_values(by="Date").reset_index(drop=True)
+
+        # DXY: RoC de 90 días calculado en la serie diaria, luego invertido.
+        working["DXY_RoC90_Inv"] = (
+            pd.to_numeric(working["DXY"], errors="coerce").pct_change(
+                periods=DXY_ROC_WINDOW_DAYS
+            )
+            * 100.0
+            * -1.0
+        )
+        working["DXY_RoC90_Inv"] = working["DXY_RoC90_Inv"].replace(
+            [np.inf, -np.inf], np.nan
+        )
+
+        weekly = _resample_weekly_last(
+            working,
+            date_column="Date",
+            value_columns=["US10Y", "STLFSI4", "DXY_RoC90_Inv", "BTC_Close"],
+        )
+
+        if weekly.empty:
+            return empty_result
+
+        # Requerimiento 2: SMA de mediano/largo plazo sobre US10Y, ya en
+        # cadencia semanal (bounded_window semanas ~ mediano/largo plazo).
+        bounded_window = max(
+            US10Y_SMA_MIN_WEEKS, min(US10Y_SMA_MAX_WEEKS, int(us10y_sma_weeks))
+        )
+        weekly["US10Y_SMA"] = (
+            weekly["US10Y"]
+            .rolling(window=bounded_window, min_periods=max(2, bounded_window // 2))
+            .mean()
+        )
+
+        # Liquidez Global: se REUTILIZA (solo lectura) el índice ya
+        # existente y sin modificar. Componentes por defecto (todos ON).
+        combined_liquidity = build_combined_global_liquidity_index(master_dataframe)
+        if not combined_liquidity.empty and "Indice_Global_Final" in combined_liquidity.columns:
+            liquidity_slice = combined_liquidity.loc[
+                :, ["Date", "Indice_Global_Final"]
+            ].rename(columns={"Indice_Global_Final": "Liquidez_Global_Zscore"})
+            weekly = pd.merge(weekly, liquidity_slice, on="Date", how="left")
+        else:
+            weekly["Liquidez_Global_Zscore"] = np.nan
+
+        # MVRV Z-Score: reindexado a calendario diario continuo + ffill,
+        # igual criterio que el resto del programa, antes de reagrupar.
+        if mvrv_dataframe is not None and not mvrv_dataframe.empty:
+            mvrv_clean = mvrv_dataframe.loc[:, ["Date", "MVRV_Zscore"]].copy()
+            mvrv_clean["Date"] = pd.to_datetime(mvrv_clean["Date"], errors="coerce")
+            mvrv_clean = mvrv_clean.dropna(subset=["Date"]).sort_values(by="Date")
+
+            full_daily_index = pd.date_range(
+                start=mvrv_clean["Date"].min(),
+                end=max(mvrv_clean["Date"].max(), weekly["Date"].max()),
+                freq="D",
+            )
+            mvrv_daily = (
+                mvrv_clean.set_index("Date")
+                .reindex(full_daily_index)
+                .ffill()
+                .rename_axis("Date")
+                .reset_index()
+            )
+
+            mvrv_weekly = _resample_weekly_last(
+                mvrv_daily, date_column="Date", value_columns=["MVRV_Zscore"]
+            )
+            weekly = pd.merge(weekly, mvrv_weekly, on="Date", how="left")
+        else:
+            LOGGER.warning(
+                "Sin historial de MVRV Z-Score disponible; la columna "
+                "MVRV_Zscore y la Señal de Compra Macro quedarán vacías."
+            )
+            weekly["MVRV_Zscore"] = np.nan
+
+        # Requerimiento 6: Señal de Compra Macro (ambas condiciones a la
+        # vez, en la misma semana). Con NaN en cualquiera de los dos
+        # lados, la comparación da False de forma natural (no se activa
+        # una señal con datos incompletos).
+        weekly["Senal_Compra_Macro"] = (
+            (weekly["Liquidez_Global_Zscore"] < LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD)
+            & (weekly["MVRV_Zscore"] < MVRV_CAPITULATION_THRESHOLD)
+        ).fillna(False)
+
+        for column in MACRO_PANEL_COLUMNS:
+            if column not in weekly.columns:
+                weekly[column] = np.nan
+
+        weekly = weekly.loc[:, MACRO_PANEL_COLUMNS]
+        weekly = weekly.sort_values(by="Date").reset_index(drop=True)
+
+        LOGGER.info(
+            "Panel Macro-Bitcoin Avanzado construido. Semanas: %s. "
+            "Señales de compra detectadas: %s.",
+            len(weekly),
+            int(weekly["Senal_Compra_Macro"].sum()),
+        )
+
+        return weekly
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al construir el Panel Macro-Bitcoin Avanzado. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return empty_result
