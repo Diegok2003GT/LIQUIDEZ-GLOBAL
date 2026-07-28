@@ -61,10 +61,215 @@ LOGGER = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Macro Liquidity Terminal",
-    page_icon="📈",
+    page_icon="▪",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# =====================================================================
+# REDISEÑO VISUAL (Dark Institutional Terminal) - SOLO CSS/HTML.
+# =====================================================================
+# IMPORTANTE: este bloque es puramente de presentación (CSS inyectado vía
+# st.markdown). NO declara, redefine ni toca ninguna variable, función o
+# columna usada por el motor de datos, el caché o los gráficos - solo
+# cambia cómo se ven los contenedores nativos de Streamlit (fondo,
+# bordes, tipografía, tabs, alertas, botones, inputs). Los colores
+# semánticos de st.success/st.warning/st.error/st.info (verde/ámbar/
+# rojo/azul) se conservan intactos; solo se aplanan sus bordes y sombras
+# para que luzcan como una barra de estado técnica, no como un "toast" de
+# prototipo.
+INSTITUTIONAL_TERMINAL_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+:root {
+    --ilt-bg: #08090b;
+    --ilt-panel-bg: #0d0f12;
+    --ilt-border: #232629;
+    --ilt-border-soft: #1a1c1f;
+    --ilt-text: #d8dadd;
+    --ilt-text-muted: #7c8288;
+    --ilt-accent: #c9a24b;
+    --ilt-green: #2e9e5b;
+    --ilt-amber: #c9862f;
+    --ilt-red: #b3413a;
+}
+
+html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+    background-color: var(--ilt-bg) !important;
+    color: var(--ilt-text) !important;
+    font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+}
+
+[data-testid="stHeader"] { background-color: transparent !important; border-bottom: 1px solid var(--ilt-border-soft); }
+
+[data-testid="stSidebar"] {
+    background-color: var(--ilt-panel-bg) !important;
+    border-right: 1px solid var(--ilt-border);
+}
+
+/* Tipografía técnica en mayúsculas para todos los encabezados nativos */
+h1, h2, h3, h4,
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3 {
+    font-family: 'IBM Plex Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--ilt-text) !important;
+    font-weight: 600 !important;
+    border-bottom: 1px solid var(--ilt-border-soft);
+    padding-bottom: 6px;
+}
+
+p, span, label, .stCaption, [data-testid="stCaptionContainer"] {
+    font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+    color: var(--ilt-text-muted);
+}
+
+/* Contenedores planos, sin sombras plásticas */
+[data-testid="stExpander"] {
+    background-color: var(--ilt-panel-bg) !important;
+    border: 1px solid var(--ilt-border) !important;
+    border-radius: 2px !important;
+    box-shadow: none !important;
+}
+[data-testid="stExpander"] summary {
+    font-family: 'IBM Plex Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.82rem;
+}
+
+/* Botones planos, sin bordes redondeados exagerados */
+.stButton > button, .stDownloadButton > button {
+    background-color: var(--ilt-panel-bg) !important;
+    color: var(--ilt-text) !important;
+    border: 1px solid var(--ilt-border) !important;
+    border-radius: 2px !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.78rem;
+    box-shadow: none !important;
+    transition: border-color 0.15s ease-in-out;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+    border-color: var(--ilt-accent) !important;
+    color: var(--ilt-accent) !important;
+}
+
+/* Tabs estilo terminal: indicador de línea inferior, sin píldoras */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    border-bottom: 1px solid var(--ilt-border);
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.8rem;
+    color: var(--ilt-text-muted) !important;
+    border-radius: 0 !important;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--ilt-text) !important;
+    border-bottom: 2px solid var(--ilt-accent) !important;
+}
+
+/* Alertas (Health Check) aplanadas, colores semánticos intactos */
+[data-testid="stAlert"] {
+    border-radius: 2px !important;
+    border: 1px solid var(--ilt-border) !important;
+    box-shadow: none !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.82rem;
+}
+div[data-baseweb="notification"] { border-radius: 2px !important; }
+
+/* Inputs, selects, sliders: look minimalista */
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input {
+    background-color: var(--ilt-panel-bg) !important;
+    border: 1px solid var(--ilt-border) !important;
+    border-radius: 2px !important;
+    color: var(--ilt-text) !important;
+}
+[data-testid="stSlider"] [data-baseweb="slider"] > div > div {
+    background: var(--ilt-accent) !important;
+}
+
+/* Encabezado de sección con rótulo de opciones en la esquina */
+.ilt-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--ilt-border);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+}
+.ilt-section-title {
+    font-family: 'IBM Plex Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--ilt-text);
+}
+.ilt-section-options {
+    font-family: 'IBM Plex Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.68rem;
+    color: var(--ilt-text-muted);
+    border: 1px solid var(--ilt-border);
+    padding: 3px 10px;
+    border-radius: 2px;
+    white-space: nowrap;
+}
+</style>
+"""
+
+st.markdown(INSTITUTIONAL_TERMINAL_CSS, unsafe_allow_html=True)
+
+
+def render_terminal_section_header(title: str, options_label: str = "OPCIONES") -> None:
+    """
+    Encabezado de sección estilo terminal institucional: título técnico en
+    mayúsculas a la izquierda y un rótulo minimalista de opciones a la
+    derecha (puramente visual, no agrega ni quita ninguna funcionalidad).
+
+    Esta función SOLO renderiza HTML/CSS vía st.markdown - no descarga ni
+    procesa ningún dato, y no reemplaza ninguna llamada existente al
+    motor de liquidez, al caché o a los constructores de figuras.
+
+    Parameters
+    ----------
+    title : str
+        Título de la sección (se muestra tal cual, en mayúsculas por CSS).
+    options_label : str
+        Texto minimalista de la esquina superior derecha del panel.
+    """
+    try:
+        st.markdown(
+            f"""
+            <div class="ilt-section-header">
+                <span class="ilt-section-title">{title}</span>
+                <span class="ilt-section-options">{options_label}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception as error:
+        LOGGER.exception(
+            "Error al renderizar encabezado de sección. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        st.subheader(title)
 
 
 ASSET_OPTIONS = {
@@ -667,7 +872,7 @@ def render_guide_lines_panel() -> None:
     con un clic).
     """
     st.markdown("---")
-    st.subheader("📐 Líneas Guía (Soportes / Resistencias)")
+    st.subheader("LÍNEAS GUÍA (SOPORTES / RESISTENCIAS)")
     st.caption(
         "Marca niveles o fechas clave sobre cualquiera de los dos paneles. "
         "También puedes usar las herramientas de dibujo nativas de la "
@@ -696,7 +901,7 @@ def render_guide_lines_panel() -> None:
     with clear_column:
         st.write("")
         st.write("")
-        if st.button("🗑️ Borrar todas las líneas guía"):
+        if st.button("BORRAR TODAS LAS LÍNEAS GUÍA"):
             st.session_state["guide_lines"] = []
             st.rerun()
 
@@ -709,7 +914,7 @@ def render_guide_lines_panel() -> None:
             else "Valor Y (Precio en USD)"
         )
         h_value = st.number_input(
-            f"➕ Línea horizontal — {h_label}",
+            f"LÍNEA HORIZONTAL — {h_label}",
             value=0.0,
             step=0.1,
             key="guide_h_value",
@@ -728,7 +933,7 @@ def render_guide_lines_panel() -> None:
 
     with vertical_column:
         v_date = st.date_input(
-            "➕ Línea vertical — Fecha",
+            "LÍNEA VERTICAL — FECHA",
             value=date.today(),
             key="guide_v_value",
         )
@@ -1821,7 +2026,7 @@ def render_risk_panel(
                         value="N/D",
                         delta="Datos insuficientes",
                     )
-                    st.warning("⚠️ No hay datos suficientes del DXY.")
+                    st.warning("No hay datos suficientes del DXY.")
                 else:
                     st.metric(
                         label="DXY — Tendencia 7 días",
@@ -1831,11 +2036,11 @@ def render_risk_panel(
                     )
 
                     if dxy_change > 0:
-                        st.error("🔴 Alerta: DXY al alza (Presión Bajista)")
+                        st.error("ALERTA: DXY AL ALZA (PRESIÓN BAJISTA)")
                     elif dxy_change < 0:
-                        st.success("🟢 DXY a la baja (Favorable)")
+                        st.success("DXY A LA BAJA (FAVORABLE)")
                     else:
-                        st.info("🟡 DXY sin variación relevante.")
+                        st.info("DXY SIN VARIACIÓN RELEVANTE.")
 
             except Exception as error:
                 LOGGER.exception(
@@ -1872,7 +2077,7 @@ def render_risk_panel(
                             value="N/D",
                             delta="Datos insuficientes",
                         )
-                        st.warning("⚠️ No hay datos suficientes de USDT.D.")
+                        st.warning("No hay datos suficientes de USDT.D.")
                     else:
                         st.metric(
                             label="USDT.D — Tendencia 7 días",
@@ -1882,11 +2087,11 @@ def render_risk_panel(
                         )
 
                         if usdt_change > 0:
-                            st.error("🔴 Capital refugiándose en Cash")
+                            st.error("CAPITAL REFUGIÁNDOSE EN CASH")
                         elif usdt_change < 0:
-                            st.success("🟢 Capital rotando a Riesgo")
+                            st.success("CAPITAL ROTANDO A RIESGO")
                         else:
-                            st.info("🟡 Dominancia USDT sin variación relevante.")
+                            st.info("DOMINANCIA USDT SIN VARIACIÓN RELEVANTE.")
 
                 elif has_stablecoin_dominance:
                     # NUEVO: LIQUIDEZ AVANZADA - fallback gratuito, honesto y
@@ -1902,7 +2107,7 @@ def render_risk_panel(
                             value="N/D",
                             delta="Datos insuficientes",
                         )
-                        st.warning("⚠️ No hay datos suficientes todavía.")
+                        st.warning("No hay datos suficientes todavía.")
                     else:
                         st.metric(
                             label="USDT vs. Stablecoins — Tendencia 7 días",
@@ -1912,11 +2117,11 @@ def render_risk_panel(
                         )
 
                         if usdt_change > 0:
-                            st.error("🔴 USDT ganando terreno frente a otras stablecoins")
+                            st.error("USDT GANANDO TERRENO FRENTE A OTRAS STABLECOINS")
                         elif usdt_change < 0:
-                            st.success("🟢 USDT perdiendo terreno frente a otras stablecoins")
+                            st.success("USDT PERDIENDO TERRENO FRENTE A OTRAS STABLECOINS")
                         else:
-                            st.info("🟡 Sin variación relevante.")
+                            st.info("SIN VARIACIÓN RELEVANTE.")
 
                     st.caption(
                         "ℹ️ Esta NO es la dominancia clásica de USDT sobre todo "
@@ -1965,7 +2170,7 @@ def render_liquidity_engine_controls() -> Tuple[Dict[str, bool], Dict[str, bool]
     Tuple[Dict[str, bool], Dict[str, bool]]
         (base_toggles, region_toggles) con el estado actual de cada checkbox.
     """
-    st.sidebar.markdown("### 🧮 Motor de Liquidez Compuesta")
+    st.sidebar.markdown("### MOTOR DE LIQUIDEZ COMPUESTA")
     st.sidebar.caption(
         "Fórmula base: WALCL − (TGA + RRP). Actívalo o desactívalo por "
         "componente; el gráfico se recalcula al instante."
@@ -2020,7 +2225,7 @@ def render_catalyst_panel() -> None:
         )
 
     with accel_column:
-        st.markdown("**🟢 Aceleradores**")
+        st.markdown("**ACELERADORES**")
         active_accelerators = [
             name
             for name in LAG_ACCELERATORS
@@ -2028,7 +2233,7 @@ def render_catalyst_panel() -> None:
         ]
 
     with decel_column:
-        st.markdown("**🔴 Desaceleradores**")
+        st.markdown("**DESACELERADORES**")
         active_decelerators = [
             name
             for name in LAG_DECELERATORS
@@ -2058,7 +2263,7 @@ def render_health_check_panel(health_report: Dict[str, str]) -> None:
     """
     Muestra el estatus (OK / ERROR) de cada fuente de datos recolectada.
     """
-    with st.sidebar.expander("📡 Estado de las Fuentes (Health Check)", expanded=False):
+    with st.sidebar.expander("ESTADO DE LAS FUENTES (HEALTH CHECK)", expanded=False):
         if not health_report:
             st.write("Sin información de salud disponible todavía.")
             return
@@ -2076,7 +2281,7 @@ def render_documentation_panel() -> None:
     Explica de forma clara qué hace el programa y para qué sirve cada
     control, en una sección plegable.
     """
-    with st.expander("📖 ¿Cómo funciona este programa?"):
+    with st.expander("¿CÓMO FUNCIONA ESTE PROGRAMA?"):
         st.markdown(
             """
 **¿Qué datos usa?**
@@ -2120,7 +2325,7 @@ def render_main_dashboard() -> None:
     Ejecuta la aplicación Streamlit.
     """
     try:
-        st.title("📈 Macro Liquidity Terminal")
+        render_terminal_section_header("MACRO LIQUIDITY TERMINAL", options_label="OPCIONES · PANEL PRINCIPAL")
         st.caption(
             "Monitor institucional de liquidez global, criptoactivos "
             "y señales de riesgo."
@@ -2156,7 +2361,7 @@ def render_main_dashboard() -> None:
         # ACTUALIZACIÓN PARCHE: modo de visualización (combinado vs paneles).
         # MEJORA TRADINGVIEW: el modo de paneles ahora es vertical (activo
         # arriba, liquidez abajo a todo el ancho), no lado a lado.
-        st.sidebar.markdown("### 🖥️ Visualización")
+        st.sidebar.markdown("### VISUALIZACIÓN")
         display_mode = st.sidebar.radio(
             "Modo de visualización",
             options=["Combinado (recomendado)", "Estilo TradingView (Vertical)"],
@@ -2365,7 +2570,7 @@ def render_main_dashboard() -> None:
             with restore_column:
                 st.write("")
                 st.write("")
-                if st.button("↺ Restaurar Proporción Original"):
+                if st.button("RESTAURAR PROPORCIÓN ORIGINAL"):
                     st.session_state["asset_panel_height"] = DEFAULT_ASSET_PANEL_HEIGHT
                     st.session_state["liquidity_panel_height"] = DEFAULT_LIQUIDITY_PANEL_HEIGHT
                     st.session_state["asset_amplification"] = DEFAULT_VERTICAL_AMPLIFICATION
@@ -2373,7 +2578,7 @@ def render_main_dashboard() -> None:
                     st.rerun()
 
             st.caption(
-                "💡 Mueve el cursor sobre cualquiera de los dos paneles: la "
+                "Mueve el cursor sobre cualquiera de los dos paneles: la "
                 "línea vertical se sincroniza en ambos. La rueda del mouse "
                 "hace zoom horizontal, y cada panel reajusta su propia "
                 "escala vertical automáticamente. Si el desfase está "
@@ -2462,14 +2667,14 @@ def render_advanced_liquidity_tab() -> None:
     exactamente como antes.
     """
     try:
-        st.title("🧪 Liquidez Avanzada: Índices Normalizados")
+        render_terminal_section_header("LIQUIDEZ AVANZADA: ÍNDICES NORMALIZADOS", options_label="OPCIONES · LIQUIDEZ AVANZADA")
         st.caption(
             "Dos canastas independientes, cada una con su propia "
             "normalización, para compararse con Bitcoin/Solana sin "
             "aplanarse ni exagerarse."
         )
 
-        with st.expander("📖 ¿Cómo se calculan estos índices?"):
+        with st.expander("¿CÓMO SE CALCULAN ESTOS ÍNDICES?"):
             st.markdown(
                 """
 **Liquidez Global Combinada (Fed + BCE)**
@@ -2527,7 +2732,7 @@ como tal.
         sma_window_weeks = COMBINED_LIQUIDITY_DEFAULT_SMA_WEEKS
 
         if is_combined_global:
-            st.markdown("### 🧮 Componentes de la Liquidez Global Combinada")
+            st.markdown("### COMPONENTES DE LA LIQUIDEZ GLOBAL COMBINADA")
             st.caption(
                 "Desmarca cualquier componente para excluirlo por completo "
                 "de la canasta - el índice se recalcula al instante. "
@@ -2624,13 +2829,13 @@ como tal.
         with restore_column:
             st.write("")
             st.write("")
-            if st.button("↺ Restaurar Proporción Original", key="adv_restore_button"):
+            if st.button("RESTAURAR PROPORCIÓN ORIGINAL", key="adv_restore_button"):
                 st.session_state["adv_asset_panel_height"] = DEFAULT_ASSET_PANEL_HEIGHT
                 st.session_state["adv_index_panel_height"] = DEFAULT_LIQUIDITY_PANEL_HEIGHT
                 st.rerun()
 
         st.caption(
-            "💡 Igual que en el Panel Principal: rueda del mouse = zoom "
+            "Igual que en el Panel Principal: rueda del mouse = zoom "
             "horizontal, arrastrar el eje Y = comprimir/estirar la escala, "
             "cursor sincronizado entre ambos paneles."
         )
@@ -2700,7 +2905,7 @@ como tal.
             liquidity_amplification=1.0,
         )
 
-        with st.expander("📡 Estado de las fuentes de esta pestaña (Health Check)"):
+        with st.expander("ESTADO DE LAS FUENTES DE ESTA PESTAÑA (HEALTH CHECK)"):
             # NUEVO: Liquidez Global Combinada - el health check se indexa
             # por ID de serie de FRED (no por nombre interno de columna),
             # así que se filtra por los IDs reales: WALCL, WDTGAL,
@@ -2740,7 +2945,7 @@ como tal.
 # No modifica create_main_figure, create_liquidity_only_figure,
 # create_asset_only_figure, build_synced_dual_panel_figure,
 # render_synced_dual_panel_chart, build_advanced_index_synced_figure, ni
-# el bloque "🧮 Componentes de la Liquidez Global Combinada" dentro de
+# el bloque "Componentes de la Liquidez Global Combinada" dentro de
 # render_advanced_liquidity_tab(), que permanecen intactos.
 
 MACRO_PANEL_ROW_HEIGHT = 230  # alto por fila (px), 4 filas sincronizadas
@@ -2901,7 +3106,7 @@ def build_macro_signals_synced_figure(
                         "line": {"color": "#0E1117", "width": 1},
                     },
                     hovertemplate=(
-                        "<b>🟢 Señal de Compra Macro</b><br>"
+                        "<b>SEÑAL DE COMPRA MACRO</b><br>"
                         "Semana: %{x|%d-%m-%Y}<br>"
                         "Liquidez en cuartil inferior + MVRV en capitulación"
                         "<extra></extra>"
@@ -3036,7 +3241,10 @@ def render_macro_signals_tab() -> None:
     de Compra Macro (Requerimiento 6).
     """
     try:
-        st.subheader("🧭 Señales Macro Avanzadas (US10Y · STLFSI4 · DXY · MVRV)")
+        render_terminal_section_header(
+            "SEÑALES MACRO AVANZADAS (US10Y · STLFSI4 · DXY · MVRV)",
+            options_label="OPCIONES · SEÑALES MACRO",
+        )
         st.caption(
             "Panel independiente y sincronizado: arrastra o haz zoom en "
             "cualquiera de las 4 filas y las demás se mueven exactamente "
@@ -3089,7 +3297,7 @@ def render_macro_signals_tab() -> None:
                 panel_dataframe["Senal_Compra_Macro"] == True, "Date"  # noqa: E712
             ].max()
             st.success(
-                f"🟢 {signals_count} señal(es) de Compra Macro detectadas en "
+                f"{signals_count} SEÑAL(ES) DE COMPRA MACRO DETECTADAS EN "
                 f"el historial. Última: {last_signal_date.strftime('%d-%m-%Y')}."
             )
         else:
@@ -3110,7 +3318,7 @@ def render_macro_signals_tab() -> None:
             config=TRADINGVIEW_PLOTLY_CONFIG,
         )
 
-        with st.expander("📡 Estado de las fuentes de esta pestaña (Health Check)"):
+        with st.expander("ESTADO DE LAS FUENTES DE ESTA PESTAÑA (HEALTH CHECK)"):
             relevant_sources = {
                 key: value
                 for key, value in health_report.items()
@@ -3184,7 +3392,7 @@ def main() -> None:
     LIQUIDEZ AVANZADA / NUEVO: PANEL MACRO-BITCOIN AVANZADO).
     """
     tab_main, tab_advanced, tab_macro_signals = st.tabs(
-        ["📊 Panel Principal", "🧪 Liquidez Avanzada", "🧭 Señales Macro Avanzadas"]
+        ["PANEL PRINCIPAL", "LIQUIDEZ AVANZADA", "SEÑALES MACRO AVANZADAS"]
     )
 
     with tab_main:
