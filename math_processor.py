@@ -248,7 +248,7 @@ def _normalize_dates(dataframe: pd.DataFrame) -> pd.DataFrame:
 
 
 # =====================================================================
-# ACTUALIZACIÓN (Directriz 1 - Alineación temporal estricta desde la raíz)
+# Directriz 1 (turno anterior) - Alineación temporal estricta desde la raíz
 # =====================================================================
 # Apertura PARCIAL y controlada del "Candado Estricto" del gráfico
 # "Componentes de la Liquidez Global Combinada": esta función NO cambia
@@ -844,6 +844,29 @@ def _calculate_component_scales(master_dataframe: pd.DataFrame) -> pd.DataFrame:
     de cambio. JPY=X, en cambio, representa "yenes por dólar", así que
     para JPNASSETS sí corresponde DIVIDIR.
 
+    CORRECCIÓN DE ERROR (muro vertical en Europa/BCE, jul-ago 2023):
+    ECBASSET_USD_T se convertía multiplicando por EURUSD=X de Yahoo
+    Finance, pero esa serie se descarga con YFINANCE_PERIOD="3y" (ventana
+    FIJA de 3 años desde la fecha de ejecución) - es decir, Yahoo
+    simplemente NO tiene ningún tipo de cambio antes de esos ~3 años,
+    aunque el balance del BCE (ECBASSET, vía FRED) sí tiene décadas de
+    historia real. _ensure_numeric_column rellena esos huecos de EURUSD
+    con 0.0, así que "valid_eurusd" daba False y ECBASSET_USD_T se forzaba
+    a 0.0 en TODA fecha anterior a esos ~3 años - un "cero" fabricado por
+    la ventana de Yahoo, no un dato real. Eso es exactamente lo que se veía
+    como una pared vertical partiendo desde cero en Liquidez_Global.
+
+    La corrección usa DEXUSEU_FRED (tipo de cambio EUR/USD publicado por
+    la propia FRED, con la misma profundidad histórica multi-década que
+    ECBASSETSW - ya se descarga para la Liquidez Global Combinada) como
+    fuente PRIMARIA de conversión, con EURUSD (Yahoo) solo como respaldo
+    puntual. Si, para una fecha concreta, NINGUNA de las dos fuentes tiene
+    un tipo de cambio válido, ECBASSET_USD_T queda en NaN (dato ausente y
+    honesto) en vez de 0.0 (un cero disfrazado de observación real) -
+    calculate_composite_liquidity ya trata un componente NaN como "no
+    participa" para esa fecha exacta, calculando la liquidez con el resto
+    de componentes disponibles (Fed, TGA, RRP), sin inventar una caída.
+
     Parameters
     ----------
     master_dataframe : pd.DataFrame
@@ -917,17 +940,37 @@ def _calculate_component_scales(master_dataframe: pd.DataFrame) -> pd.DataFrame:
             processed_dataframe["JPNASSETS"] / JPY_HUNDRED_MILLIONS_TO_TRILLIONS
         )
 
-        valid_eurusd = processed_dataframe["EURUSD"] > 0
         valid_cnyusd = processed_dataframe["CNYUSD"] > 0
         valid_jpyusd = processed_dataframe["JPYUSD"] > 0  # ACTUALIZACIÓN PARCHE
 
+        # CORRECCIÓN DE ERROR (muro vertical en Europa/BCE): tipo de
+        # cambio EUR/USD "mejor disponible" para convertir ECBASSET a
+        # dólares. DEXUSEU_FRED (FRED, historia completa desde ~1999) es
+        # la fuente PRIMARIA; EURUSD (Yahoo, solo ~3 años de historia por
+        # YFINANCE_PERIOD) queda como respaldo puntual si, para una fecha
+        # concreta, DEXUSEU_FRED no trajera un valor válido. Se calcula
+        # ANTES de _ensure_numeric_column sobre DEXUSEU_FRED para no
+        # perder la distinción entre "0 real" y "sin dato" con un
+        # fillna(0.0) prematuro.
+        eurusd_fred_raw = pd.to_numeric(
+            processed_dataframe.get("DEXUSEU_FRED"), errors="coerce"
+        )
+        eurusd_yahoo_raw = pd.to_numeric(
+            processed_dataframe.get("EURUSD"), errors="coerce"
+        )
+        best_eurusd_rate = eurusd_fred_raw.where(
+            eurusd_fred_raw > 0, eurusd_yahoo_raw
+        )
+        valid_eurusd = best_eurusd_rate > 0
+
         # ACTUALIZACIÓN PARCHE (CORRECCIÓN DE ERROR): se multiplica, no se
-        # divide. EURUSD=X ya es "USD por EUR".
+        # divide. El tipo de cambio ya es "USD por EUR". Si NINGUNA fuente
+        # tiene un tipo de cambio válido para una fecha, se deja NaN en
+        # vez de forzar 0.0 (ver nota de corrección arriba).
         processed_dataframe["ECBASSET_USD_T"] = np.where(
             valid_eurusd,
-            processed_dataframe["ECBASSET_EUR_T"]
-            * processed_dataframe["EURUSD"],
-            0.0,
+            processed_dataframe["ECBASSET_EUR_T"] * best_eurusd_rate,
+            np.nan,
         )
 
         # ACTUALIZACIÓN PARCHE (CORRECCIÓN DE ERROR): se multiplica, no se
@@ -980,6 +1023,12 @@ def calculate_composite_liquidity(
 
     Si un checkbox se desactiva, ese componente se excluye por completo de
     la suma (no se reemplaza por cero disfrazado: simplemente no participa).
+
+    NOTA (corrección BCE): si un componente activo trae NaN en una fecha
+    puntual (ej. Europa antes de que exista un tipo de cambio EUR/USD
+    válido en cualquiera de las dos fuentes), esa fecha se calcula con el
+    resto de componentes disponibles - el NaN no participa en la suma de
+    esa fecha, en vez de forzar una caída a cero visible en el gráfico.
 
     Parameters
     ----------
@@ -1041,6 +1090,14 @@ def calculate_composite_liquidity(
                     )
                     continue
 
+                # NOTA (corrección BCE): fillna(0.0) aquí es correcto y
+                # deliberado - convierte "sin dato válido en esta fecha"
+                # en "no aporta a la suma en esta fecha", que es
+                # exactamente el retro-cálculo pedido (Fed, TGA, RRP siguen
+                # sumando normalmente aunque Europa no tenga un tipo de
+                # cambio válido ese día). Ya no hay un 0.0 fabricado río
+                # arriba en _calculate_component_scales - el NaN que llega
+                # aquí es un NaN genuino.
                 component_values = pd.to_numeric(
                     processed_dataframe[column_name], errors="coerce"
                 ).fillna(0.0)
@@ -1285,11 +1342,11 @@ def build_master_dataframe(
     app.py (Requerimiento 5). Cualquier código que llame a esta función debe
     desempaquetar la tupla.
 
-    ACTUALIZACIÓN (Directriz 1): cada serie FRED/Yahoo (no cripto) ya llega
-    aquí reindexada a calendario diario continuo y ffilleada de forma
-    independiente desde la raíz (_prepare_fred_series /
-    _prepare_yahoo_close_series), antes del outer merge - ver comentarios
-    en ese módulo para el detalle exacto.
+    ACTUALIZACIÓN (Directriz 1, turno anterior): cada serie FRED/Yahoo (no
+    cripto) ya llega aquí reindexada a calendario diario continuo y
+    ffilleada de forma independiente desde la raíz
+    (_prepare_fred_series / _prepare_yahoo_close_series), antes del outer
+    merge - ver comentarios en ese módulo para el detalle exacto.
 
     Parameters
     ----------
