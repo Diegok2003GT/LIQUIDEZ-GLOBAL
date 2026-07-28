@@ -230,6 +230,152 @@ div[data-baseweb="notification"] { border-radius: 2px !important; }
     border-radius: 2px;
     white-space: nowrap;
 }
+
+/* =====================================================================
+   ADAPTABILIDAD MÓVIL (aislada por Media Queries)
+   =====================================================================
+   REGLA DE BLINDAJE: todo lo que sigue vive exclusivamente dentro de
+   bloques @media (max-width: ...). Una media query, por definición, solo
+   aplica cuando el ancho del viewport cumple la condición - fuera de ese
+   rango (escritorio, >1024px) el navegador simplemente ignora estas
+   reglas y el diseño institucional de arriba queda 100% intacto: mismas
+   dimensiones, mismos anchos de contenedor, misma disposición de rejilla.
+   No se sobreescribe ni se duplica ninguna regla de escritorio; esto es
+   puramente aditivo y solo para pantallas angostas (tablets pequeñas y
+   móviles). No toca lógica de datos, cálculos, caché ni colores de
+   alerta del Health Check - solo tamaños, espaciados y apilamiento.
+*/
+
+/* Tablets pequeñas / móviles en horizontal */
+@media (max-width: 1024px) {
+    .ilt-section-header {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+}
+
+/* Móviles y tablets pequeñas */
+@media (max-width: 768px) {
+    /* Menos aire lateral para aprovechar el ancho angosto de un teléfono */
+    [data-testid="stAppViewContainer"] .block-container {
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
+        padding-top: 1rem !important;
+        max-width: 100% !important;
+    }
+
+    /* Tipografía técnica un poco más compacta, sin perder legibilidad */
+    h1, h2, h3, h4,
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        letter-spacing: 0.05em !important;
+        font-size: 1rem !important;
+        white-space: normal;
+    }
+
+    /* Encabezado de sección: título arriba, rótulo de opciones debajo,
+       en vez de forzados en una sola fila que se corta */
+    .ilt-section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+    .ilt-section-title {
+        font-size: 0.85rem;
+        letter-spacing: 0.07em;
+        white-space: normal;
+    }
+    .ilt-section-options {
+        font-size: 0.62rem;
+        align-self: flex-start;
+    }
+
+    /* Streamlit ya apila columnas en pantallas angostas por defecto;
+       esto solo refuerza el apilamiento vertical y quita márgenes
+       laterales redundantes entre columnas apiladas en móvil. */
+    [data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+    }
+    [data-testid="column"] {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+    }
+
+    /* Botones a ancho completo: objetivo de toque más grande en móvil */
+    .stButton > button, .stDownloadButton > button {
+        width: 100%;
+        font-size: 0.72rem;
+        padding: 0.55rem 0.6rem;
+    }
+
+    /* Tabs: permiten scroll horizontal en vez de aplastarse ilegibles */
+    .stTabs [data-baseweb="tab-list"] {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        flex-wrap: nowrap;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 0.68rem;
+        padding: 8px 10px;
+        white-space: nowrap;
+    }
+
+    /* Expanders: encabezado más compacto y con salto de línea permitido */
+    [data-testid="stExpander"] summary {
+        font-size: 0.72rem;
+        white-space: normal;
+    }
+
+    /* Health Check y demás alertas: texto más chico, sin desbordar el
+       contenedor angosto - los colores semánticos NO se tocan aquí. */
+    [data-testid="stAlert"] {
+        font-size: 0.72rem;
+        padding: 0.6rem 0.7rem;
+    }
+    [data-testid="stAlert"] p {
+        word-break: break-word;
+    }
+
+    /* Sliders y selects: ligera reducción de tamaño de texto */
+    [data-testid="stSlider"], [data-testid="stSelectbox"] {
+        font-size: 0.82rem;
+    }
+
+    /* Gráficos Plotly: si el ancho intrínseco excede la pantalla, se
+       habilita scroll horizontal contenido en vez de recortar o
+       deformar el gráfico (la altura configurada en Python no se toca,
+       solo se asegura que no rompa el layout de la página). */
+    [data-testid="stPlotlyChart"] {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Sidebar más angosta y con menos padding en móvil */
+    [data-testid="stSidebar"] {
+        min-width: 82vw !important;
+        padding-right: 0.5rem;
+    }
+}
+
+/* Teléfonos pequeños */
+@media (max-width: 480px) {
+    [data-testid="stAppViewContainer"] .block-container {
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+    .ilt-section-title {
+        font-size: 0.75rem;
+    }
+    .ilt-section-options {
+        font-size: 0.58rem;
+        padding: 2px 7px;
+    }
+    .stButton > button, .stDownloadButton > button {
+        font-size: 0.68rem;
+    }
+}
 </style>
 """
 
