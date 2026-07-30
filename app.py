@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 from config import (
+    CHINA_DATA_DEPRECATED_WARNING,  # AUDITORÍA: Directriz 4 - Datos Obsoletos
     COMBINED_LIQUIDITY_COMPONENTS,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     COMBINED_LIQUIDITY_DEFAULT_SMA_WEEKS,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     COMBINED_LIQUIDITY_MAX_SMA_WEEKS,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
@@ -2342,6 +2343,15 @@ def render_liquidity_engine_controls() -> Tuple[Dict[str, bool], Dict[str, bool]
             component_config["label"],
             key=session_key,
         )
+
+        # AUDITORÍA (Directriz 4 - Datos Obsoletos): advertencia visual
+        # junto al checkbox de China. MYAGM2CNM189N está descontinuada en
+        # FRED desde 2019 (ver nota completa en config.py); el checkbox
+        # nace apagado por defecto, pero si el usuario lo activa igual
+        # debe ver, sin necesidad de leer el código, que ese componente
+        # sesgará los datos con un valor congelado desde esa fecha.
+        if component_key == "CHINA":
+            st.sidebar.caption(CHINA_DATA_DEPRECATED_WARNING)
 
     return base_toggles, region_toggles
 

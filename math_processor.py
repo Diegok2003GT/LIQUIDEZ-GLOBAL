@@ -4,6 +4,42 @@ Procesamiento, alineación y cálculo de indicadores de liquidez global.
 El módulo descarga las variables macroeconómicas y de mercado, las alinea
 por fecha con outer joins, aplica forward fill únicamente a datos no cripto
 y calcula la liquidez global sin invalidar la tabla si una fuente falla.
+
+AUDITORÍA (Directrices 1, 2, 3 y 5) + CORRECCIÓN DE ERROR (extremo derecho
+del gráfico):
+  1. Los tipos de cambio EUR/USD, CNY/USD y JPY/USD ahora se descargan
+     exclusivamente de FRED (DEXUSEU, DEXCHUS, DEXJPUS) en vez de Yahoo
+     Finance, eliminando el límite fijo de 3 años de YFINANCE_PERIOD para
+     estas tres series.
+  2. La conversión de divisas está unificada: si el tipo de cambio de
+     Europa, China o Japón no es válido en una fecha, el componente en USD
+     queda en NaN (no en 0.0) - "no participa" en vez de "aportar cero".
+  3. WALCL y WDTGAL se desplazan config.PUBLICATION_LAG_DAYS días hacia
+     adelante antes de reindexarse a calendario diario, simulando que el
+     dato "as of Wednesday" se conoce realmente con un día de retraso
+     (Point-in-Time Mapping, corrección de Look-Ahead Bias).
+  5. (CORREGIDO) El forward-fill posterior al outer merge, que una ronda
+     anterior de esta auditoría eliminó por considerarlo "redundante", en
+     realidad SÍ es necesario y se reincorpora aquí: el reindexado en la
+     raíz (_reindex_daily_and_ffill) solo rellena huecos DENTRO del rango
+     propio de cada serie (entre su primera y su última fecha real). No
+     extiende ninguna serie macro más allá de su propia última fecha
+     conocida. Como el calendario maestro final lo define BTC-USD (que
+     cotiza todos los días, incluido "hoy"), cualquier serie macro cuya
+     última fecha real quede por detrás del último precio de Bitcoin -algo
+     habitual en series semanales como WALCL/WDTGAL, y agravado por el
+     desplazamiento de Publication Lag del punto 3, que empuja esa última
+     fecha aún más atrás en términos relativos- se quedaba sin valor
+     (NaN) en el tramo final del gráfico. Ese NaN, al pasar por
+     `calculate_composite_liquidity` (que hace `fillna(0.0)` para tratar
+     "sin dato" como "no participa"), se traducía en una caída vertical
+     falsa de la Liquidez Global justo en los días más recientes - el
+     "desplome a cero" reportado. La corrección: un `.ffill()` final,
+     aplicado sobre el calendario YA unificado (post-merge), que proyecta
+     el último valor oficial conocido de cada serie no-cripto hasta la
+     fecha más reciente del calendario maestro, sin inventar historia
+     nueva ni tocar ninguna fecha anterior al primer dato real de cada
+     serie.
 """
 
 import logging
@@ -22,6 +58,8 @@ from config import (
     LIQUIDITY_REGION_COMPONENTS,
     MAX_NET_LAG_DAYS,
     MIN_NET_LAG_DAYS,
+    PUBLICATION_LAG_COLUMNS,  # AUDITORÍA: Point-in-Time Mapping
+    PUBLICATION_LAG_DAYS,  # AUDITORÍA: Point-in-Time Mapping
     USD_BILLIONS_TO_TRILLIONS,  # CORRECCIÓN DE ERROR
     YAHOO_TICKERS,
 )
@@ -59,6 +97,13 @@ FRED_COLUMN_MAPPING: Dict[str, str] = {
     # tal como se pidió explícitamente para este cálculo.
     "US_TREASURY_ACCOUNT_WDTGAL": "WDTGAL",
     "EUR_USD_FRED": "DEXUSEU_FRED",
+    # AUDITORÍA (Directriz 1 - Eliminación de Yahoo Finance para FX):
+    # DEXCHUS_FRED (yuanes por USD) y DEXJPUS_FRED (yenes por USD)
+    # reemplazan a las antiguas columnas CNYUSD/JPYUSD de Yahoo Finance.
+    # Se descargan, alinean (ffill diario) y fusionan exactamente igual
+    # que el resto de series FRED, vía _download_fred_dataframes.
+    "CHINA_USD_EXCHANGE": "DEXCHUS_FRED",
+    "JAPAN_USD_EXCHANGE": "DEXJPUS_FRED",
     # NUEVO: PANEL MACRO-BITCOIN AVANZADO - se registran aquí para que
     # _download_fred_dataframes() las descargue, alinee (ffill diario) y
     # fusione exactamente igual que el resto de series FRED, sin tocar
@@ -67,10 +112,10 @@ FRED_COLUMN_MAPPING: Dict[str, str] = {
     "FINANCIAL_STRESS_INDEX": "STLFSI4",
 }
 
+# AUDITORÍA (Directriz 1): ya no se descargan EUR_USD, CNY_USD ni JPY_USD
+# desde Yahoo Finance. Solo quedan las series sin equivalente gratuito en
+# FRED: el índice DXY y los precios de mercado de BTC/SOL/USDT.
 YAHOO_COLUMN_MAPPING: Dict[str, str] = {
-    "EUR_USD": "EURUSD",
-    "CNY_USD": "CNYUSD",
-    "JPY_USD": "JPYUSD",  # ACTUALIZACIÓN PARCHE
     "DOLLAR_INDEX": "DXY",
     "BITCOIN": "BTC_Close",
     "SOLANA": "SOL_Close",
@@ -93,11 +138,10 @@ MASTER_COLUMNS: List[str] = [
     "JPNASSETS",  # ACTUALIZACIÓN PARCHE
     "WDTGAL",  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     "DEXUSEU_FRED",  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
+    "DEXCHUS_FRED",  # AUDITORÍA: FX de China ahora vía FRED
+    "DEXJPUS_FRED",  # AUDITORÍA: FX de Japón ahora vía FRED
     "US10Y",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     "STLFSI4",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
-    "EURUSD",
-    "CNYUSD",
-    "JPYUSD",  # ACTUALIZACIÓN PARCHE
     "DXY",
     "BTC_Close",
     "SOL_Close",
@@ -264,7 +308,11 @@ def _normalize_dates(dataframe: pd.DataFrame) -> pd.DataFrame:
 #
 # No se inventa historia antes de la primera fecha real de cada serie: el
 # reindexado solo cubre el rango [primera fecha, última fecha] que la
-# propia fuente ya reportó.
+# propia fuente ya reportó. IMPORTANTE (ver CORRECCIÓN DE ERROR en el
+# docstring del módulo): esto significa que, por diseño, esta función NO
+# extiende ninguna serie más allá de SU PROPIA última fecha real - esa
+# extensión hasta la fecha más reciente del calendario maestro (definido
+# por BTC-USD) es responsabilidad de _outer_merge_and_align, más abajo.
 def _reindex_daily_and_ffill(
     dataframe: pd.DataFrame,
     value_column: str,
@@ -333,6 +381,79 @@ def _reindex_daily_and_ffill(
         return dataframe
 
 
+# AUDITORÍA (Directriz 3 - Point-in-Time Mapping / Publication Lag).
+def _apply_publication_lag(
+    dataframe: pd.DataFrame,
+    output_column: str,
+) -> pd.DataFrame:
+    """
+    Desplaza hacia adelante, en días de calendario, las fechas de una
+    serie cuyo valor no se conoce realmente el mismo día que reporta
+    (ej. WALCL/WDTGAL, publicadas "as of Wednesday" pero difundidas con
+    retraso). Esto simula el momento REAL en que un observador habría
+    podido conocer el dato, corrigiendo el Look-Ahead Bias que se produce
+    al reindexar/ffillear directamente sobre la fecha nominal de la serie.
+
+    Se opera sobre la columna Date (no sobre la posición de las filas):
+    un `.shift()` posicional sería incorrecto aquí porque estas series
+    tienen cadencia semanal/irregular, y desplazar una fila completa
+    movería el dato ~7 días en vez del retraso real de publicación de
+    ~1 día. Desplazar la fecha misma sí produce el efecto pedido
+    ("el dato del miércoles se conoce el jueves") sin importar la
+    cadencia de la serie de origen.
+
+    NOTA (CORRECCIÓN DE ERROR - extremo derecho del gráfico): este
+    desplazamiento, al empujar la última fecha real de la serie un poco
+    más hacia el presente, por sí solo NO crea el hueco final del
+    gráfico - lo que sí lo agrava es que _reindex_daily_and_ffill (llamada
+    después de esta función) solo rellena hasta esa última fecha
+    desplazada, nunca más allá. El relleno hasta la fecha actual del
+    calendario maestro se resuelve en _outer_merge_and_align, no aquí -
+    ver docstring del módulo.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        Serie ya preparada, con columnas Date y `output_column`, ANTES de
+        reindexarse a calendario diario continuo.
+    output_column : str
+        Nombre de la columna de valor; solo se aplica el lag si está
+        listada en config.PUBLICATION_LAG_COLUMNS.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame con Date desplazada PUBLICATION_LAG_DAYS días hacia
+        adelante si `output_column` requiere lag; sin cambios si no.
+    """
+    try:
+        if dataframe.empty or output_column not in PUBLICATION_LAG_COLUMNS:
+            return dataframe
+
+        lagged_dataframe = dataframe.copy()
+        lagged_dataframe["Date"] = lagged_dataframe["Date"] + pd.Timedelta(
+            days=PUBLICATION_LAG_DAYS
+        )
+
+        LOGGER.info(
+            "Directriz 3 - Publication Lag aplicado a %s: +%s día(s) "
+            "sobre la fecha de publicación (Point-in-Time Mapping).",
+            output_column,
+            PUBLICATION_LAG_DAYS,
+        )
+
+        return lagged_dataframe
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al aplicar el Publication Lag a %s. Tipo: %s. Detalle: %s",
+            output_column,
+            type(error).__name__,
+            error,
+        )
+        return dataframe
+
+
 def _prepare_fred_series(
     dataframe: pd.DataFrame,
     output_column: str,
@@ -380,9 +501,22 @@ def _prepare_fred_series(
         prepared_dataframe = prepared_dataframe.dropna(subset=[output_column])
         prepared_dataframe = prepared_dataframe.reset_index(drop=True)
 
+        # AUDITORÍA (Directriz 3): Publication Lag - se aplica ANTES del
+        # reindexado/ffill diario, para que el calendario continuo ya
+        # nazca con la fecha de conocimiento real del dato, no con la
+        # fecha nominal de la observación.
+        prepared_dataframe = _apply_publication_lag(
+            prepared_dataframe, output_column
+        )
+
         # ACTUALIZACIÓN (Directriz 1): ffill + reindexado diario continuo
         # aplicado de forma independiente a ESTA serie individual, en la
         # raíz, antes de unirse con las demás en _outer_merge_and_align.
+        # Este reindexado cubre únicamente [primera fecha, última fecha]
+        # de ESTA serie - el relleno hasta la fecha más reciente del
+        # calendario maestro (hoy, según BTC-USD) ocurre después, en
+        # _outer_merge_and_align (ver CORRECCIÓN DE ERROR en el docstring
+        # del módulo).
         prepared_dataframe = _reindex_daily_and_ffill(
             prepared_dataframe, output_column
         )
@@ -521,6 +655,10 @@ def _download_fred_dataframes(api_key: str) -> List[pd.DataFrame]:
     """
     Descarga y prepara todas las series macroeconómicas de FRED.
 
+    AUDITORÍA (Directriz 1): esta función ahora también descarga DEXCHUS y
+    DEXJPUS (vía FRED_COLUMN_MAPPING), reemplazando a las antiguas
+    descargas de Yahoo Finance para CNY/USD y JPY/USD.
+
     Parameters
     ----------
     api_key : str
@@ -604,6 +742,9 @@ def _download_yahoo_dataframes() -> List[pd.DataFrame]:
     """
     Descarga y prepara todas las series de Yahoo Finance.
 
+    AUDITORÍA (Directriz 1): ya solo descarga DXY, BTC_Close, SOL_Close y
+    USDT_Close - EUR/CNY/JPY se removieron de YAHOO_COLUMN_MAPPING.
+
     Returns
     -------
     List[pd.DataFrame]
@@ -666,20 +807,41 @@ def _download_yahoo_dataframes() -> List[pd.DataFrame]:
 
 def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     """
-    Une todos los DataFrames usando outer joins por Date y aplica ffill.
+    Une todos los DataFrames usando outer joins por Date y proyecta el
+    último valor oficial conocido de cada serie no-cripto hasta la fecha
+    más reciente del calendario maestro.
 
-    El forward fill se limita a datos macroeconómicos y de mercado tradicional.
-    Los precios cripto se conservan sin propagación para que sólo se mantengan
-    fechas con precio real de Bitcoin.
+    CORRECCIÓN DE ERROR (desplome a cero en el extremo derecho del
+    gráfico): una ronda anterior de esta auditoría eliminó el `.ffill()`
+    que se aplicaba aquí, después del merge, asumiendo que ya era
+    redundante porque cada serie llega reindexada desde la raíz
+    (_prepare_fred_series / _prepare_yahoo_close_series). Esa suposición
+    era incorrecta para el EXTREMO DERECHO de la serie: el reindexado en
+    la raíz (_reindex_daily_and_ffill) solo cubre el rango [primera fecha,
+    última fecha] de CADA serie individual - nunca la extiende más allá de
+    su propia última fecha real. El calendario maestro, en cambio, lo
+    determina BTC-USD (que cotiza 24/7, incluido el día de hoy). Cuando la
+    última fecha real de una serie macro semanal (ej. WALCL, WDTGAL - más
+    aún con el desplazamiento de Publication Lag de la Directriz 3, que
+    empuja esa fecha un poco más hacia el presente pero no la extiende
+    hasta "hoy") queda por detrás del último precio de Bitcoin, esa serie
+    se quedaba en NaN justo en los días más recientes tras el merge. Ese
+    NaN, al pasar por calculate_composite_liquidity (que hace
+    `fillna(0.0)` para tratar "sin dato" como "no participa"), producía
+    una caída vertical falsa de la Liquidez Global en el tramo final del
+    gráfico - el "desplome a cero" reportado.
 
-    NOTA (Directriz 1): cada serie individual ya llega aquí reindexada a
-    calendario diario continuo y ffilleada de forma independiente desde
-    _prepare_fred_series/_prepare_yahoo_close_series (la raíz). Este ffill
-    posterior al merge se conserva como red de seguridad adicional para
-    cubrir cualquier fecha que solo exista en OTRA serie del merge (ej. un
-    feriado bancario de la Fed que sí sea día hábil para el BCE); no
-    cambia el comportamiento previo, solo queda reforzado con datos de
-    entrada más puros.
+    La corrección reincorpora el `.ffill()` post-merge, pero con un
+    propósito distinto y explícito: NO es para rellenar huecos internos
+    (eso ya lo resuelve el reindexado en la raíz), sino para proyectar el
+    último valor oficial conocido de cada serie no-cripto hasta la fecha
+    más reciente del calendario unificado. No se inventa ningún valor
+    nuevo ni se retrocede en el tiempo: solo se repite hacia adelante el
+    último dato real disponible, el mismo criterio de forward-fill que ya
+    se usa en el resto del programa. Los precios cripto (BTC/SOL/USDT)
+    quedan explícitamente excluidos de este relleno: deben conservar
+    únicamente fechas con precio real, para que el calendario maestro siga
+    definido por observaciones reales de Bitcoin.
 
     Parameters
     ----------
@@ -689,7 +851,8 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        DataFrame temporal unificado.
+        DataFrame temporal unificado, con cada serie no-cripto proyectada
+        hasta la fecha más reciente del calendario maestro.
     """
     try:
         valid_dataframes = [
@@ -733,9 +896,12 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
 
         merged_dataframe = _normalize_dates(merged_dataframe)
 
-        # ACTUALIZACIÓN PARCHE: USDT_Dominance también se propaga hacia
-        # adelante (no es un precio cripto intradía, es un indicador de
-        # mercado que solo cambia con nuevas observaciones de CoinGecko).
+        # CORRECCIÓN DE ERROR (extremo derecho del gráfico): proyecta el
+        # último valor oficial conocido de cada columna no-cripto hasta la
+        # fecha más reciente del calendario unificado (ver docstring de
+        # esta función). USDT_Dominance también se incluye aquí: es un
+        # indicador de mercado (CoinGecko), no un precio intradía, así que
+        # debe comportarse igual que el resto de series no-cripto.
         columns_to_forward_fill = [
             column
             for column in merged_dataframe.columns
@@ -835,37 +1001,39 @@ def _calculate_component_scales(master_dataframe: pd.DataFrame) -> pd.DataFrame:
     eso lo hace calculate_composite_liquidity, que es la función que los
     checkboxes de la interfaz controlan (Requerimiento 1).
 
-    ACTUALIZACIÓN PARCHE - corrección de la conversión FX:
-    EURUSD=X y CNYUSD=X en Yahoo Finance representan "dólares por unidad
-    de moneda extranjera" (ej. 1 EUR = 1.08 USD). Para convertir un monto
-    en euros o yuanes a dólares hay que MULTIPLICAR por ese tipo de
-    cambio, no dividir. La versión anterior dividía, lo que inflaba
-    artificialmente (o desinflaba) el componente según el nivel del tipo
-    de cambio. JPY=X, en cambio, representa "yenes por dólar", así que
-    para JPNASSETS sí corresponde DIVIDIR.
-
-    CORRECCIÓN DE ERROR (muro vertical en Europa/BCE, jul-ago 2023):
-    ECBASSET_USD_T se convertía multiplicando por EURUSD=X de Yahoo
-    Finance, pero esa serie se descarga con YFINANCE_PERIOD="3y" (ventana
-    FIJA de 3 años desde la fecha de ejecución) - es decir, Yahoo
-    simplemente NO tiene ningún tipo de cambio antes de esos ~3 años,
-    aunque el balance del BCE (ECBASSET, vía FRED) sí tiene décadas de
-    historia real. _ensure_numeric_column rellena esos huecos de EURUSD
-    con 0.0, así que "valid_eurusd" daba False y ECBASSET_USD_T se forzaba
-    a 0.0 en TODA fecha anterior a esos ~3 años - un "cero" fabricado por
-    la ventana de Yahoo, no un dato real. Eso es exactamente lo que se veía
-    como una pared vertical partiendo desde cero en Liquidez_Global.
-
-    La corrección usa DEXUSEU_FRED (tipo de cambio EUR/USD publicado por
-    la propia FRED, con la misma profundidad histórica multi-década que
-    ECBASSETSW - ya se descarga para la Liquidez Global Combinada) como
-    fuente PRIMARIA de conversión, con EURUSD (Yahoo) solo como respaldo
-    puntual. Si, para una fecha concreta, NINGUNA de las dos fuentes tiene
-    un tipo de cambio válido, ECBASSET_USD_T queda en NaN (dato ausente y
-    honesto) en vez de 0.0 (un cero disfrazado de observación real) -
+    AUDITORÍA (Directriz 1 - FX vía FRED / Directriz 2 - NaN unificado):
+    EUR/USD, CNY/USD y JPY/USD ya NO vienen de Yahoo Finance. Las tres
+    ahora vienen de FRED (DEXUSEU_FRED, DEXCHUS_FRED, DEXJPUS_FRED), con
+    décadas de historia real en vez de la ventana fija de 3 años de Yahoo
+    Finance (YFINANCE_PERIOD="3y"). Las tres columnas de tipo de cambio se
+    leen con `pd.to_numeric(..., errors="coerce")` DIRECTAMENTE desde el
+    DataFrame Maestro, ANTES de cualquier `_ensure_numeric_column` /
+    `fillna(0.0)`, para no perder la distinción entre "0 real" y "sin
+    dato" - exactamente el mismo criterio que ya se aplicaba solo a Europa
+    en la versión anterior, ahora unificado para los tres componentes: si
+    NINGUNA fuente tiene un tipo de cambio válido en una fecha concreta,
+    el componente en USD queda en `np.nan` (dato ausente y honesto), NUNCA
+    en `0.0` (un cero disfrazado de observación real). Río abajo,
     calculate_composite_liquidity ya trata un componente NaN como "no
     participa" para esa fecha exacta, calculando la liquidez con el resto
-    de componentes disponibles (Fed, TGA, RRP), sin inventar una caída.
+    de componentes disponibles, sin inventar una caída.
+
+    Unidades de las series FRED de tipo de cambio usadas aquí:
+        - DEXUSEU_FRED: USD por 1 EUR -> para convertir EUR a USD, se
+          MULTIPLICA.
+        - DEXCHUS_FRED: CNY (yuanes) por 1 USD -> para convertir CNY a
+          USD, se DIVIDE (misma convención que JPY, no la de EUR).
+        - DEXJPUS_FRED: JPY (yenes) por 1 USD -> para convertir JPY a USD,
+          se DIVIDE.
+
+    CORRECCIÓN DE ERROR HISTÓRICA (muro vertical en Europa/BCE, jul-ago
+    2023, ya resuelta): ECBASSET_USD_T se convertía multiplicando por
+    EURUSD=X de Yahoo Finance, que solo tenía ~3 años de historia; DEXUSEU
+    ya se usaba como fuente primaria con historia completa desde ~1999.
+    Con la migración de esta auditoría, DEXUSEU_FRED pasa a ser la ÚNICA
+    fuente de conversión para Europa (ya no hay respaldo de Yahoo, que se
+    eliminó por completo), y el mismo criterio de profundidad histórica
+    completa se extiende ahora a China y Japón.
 
     Parameters
     ----------
@@ -893,9 +1061,6 @@ def _calculate_component_scales(master_dataframe: pd.DataFrame) -> pd.DataFrame:
             "ECBASSET",
             "PBoC_Assets",
             "JPNASSETS",  # ACTUALIZACIÓN PARCHE
-            "EURUSD",
-            "CNYUSD",
-            "JPYUSD",  # ACTUALIZACIÓN PARCHE
         ]
 
         for column in numeric_columns:
@@ -940,54 +1105,50 @@ def _calculate_component_scales(master_dataframe: pd.DataFrame) -> pd.DataFrame:
             processed_dataframe["JPNASSETS"] / JPY_HUNDRED_MILLIONS_TO_TRILLIONS
         )
 
-        valid_cnyusd = processed_dataframe["CNYUSD"] > 0
-        valid_jpyusd = processed_dataframe["JPYUSD"] > 0  # ACTUALIZACIÓN PARCHE
-
-        # CORRECCIÓN DE ERROR (muro vertical en Europa/BCE): tipo de
-        # cambio EUR/USD "mejor disponible" para convertir ECBASSET a
-        # dólares. DEXUSEU_FRED (FRED, historia completa desde ~1999) es
-        # la fuente PRIMARIA; EURUSD (Yahoo, solo ~3 años de historia por
-        # YFINANCE_PERIOD) queda como respaldo puntual si, para una fecha
-        # concreta, DEXUSEU_FRED no trajera un valor válido. Se calcula
-        # ANTES de _ensure_numeric_column sobre DEXUSEU_FRED para no
-        # perder la distinción entre "0 real" y "sin dato" con un
-        # fillna(0.0) prematuro.
+        # AUDITORÍA (Directriz 1 + 2): las tres tasas de cambio se leen en
+        # crudo (sin fillna previo) directamente de las columnas FRED, para
+        # poder distinguir "0/ausente" de "dato real" antes de decidir el
+        # NaN final de cada componente en USD.
         eurusd_fred_raw = pd.to_numeric(
             processed_dataframe.get("DEXUSEU_FRED"), errors="coerce"
         )
-        eurusd_yahoo_raw = pd.to_numeric(
-            processed_dataframe.get("EURUSD"), errors="coerce"
+        cnyusd_fred_raw = pd.to_numeric(
+            processed_dataframe.get("DEXCHUS_FRED"), errors="coerce"
         )
-        best_eurusd_rate = eurusd_fred_raw.where(
-            eurusd_fred_raw > 0, eurusd_yahoo_raw
+        jpyusd_fred_raw = pd.to_numeric(
+            processed_dataframe.get("DEXJPUS_FRED"), errors="coerce"
         )
-        valid_eurusd = best_eurusd_rate > 0
 
-        # ACTUALIZACIÓN PARCHE (CORRECCIÓN DE ERROR): se multiplica, no se
-        # divide. El tipo de cambio ya es "USD por EUR". Si NINGUNA fuente
-        # tiene un tipo de cambio válido para una fecha, se deja NaN en
-        # vez de forzar 0.0 (ver nota de corrección arriba).
+        valid_eurusd = eurusd_fred_raw > 0
+        valid_cnyusd = cnyusd_fred_raw > 0
+        valid_jpyusd = jpyusd_fred_raw > 0
+
+        # DEXUSEU_FRED = USD por EUR -> se multiplica.
         processed_dataframe["ECBASSET_USD_T"] = np.where(
             valid_eurusd,
-            processed_dataframe["ECBASSET_EUR_T"] * best_eurusd_rate,
+            processed_dataframe["ECBASSET_EUR_T"] * eurusd_fred_raw,
             np.nan,
         )
 
-        # ACTUALIZACIÓN PARCHE (CORRECCIÓN DE ERROR): se multiplica, no se
-        # divide. CNYUSD=X ya es "USD por CNY".
+        # AUDITORÍA (Directriz 2 - corrección del Bug 0.0): antes se
+        # multiplicaba por CNYUSD=X (Yahoo, "USD por CNY") y, sin dato
+        # válido, el componente caía a 0.0. Ahora DEXCHUS_FRED es
+        # "CNY por USD" (FRED), así que se DIVIDE, y sin dato válido el
+        # componente queda en NaN (no participa), igual que Europa.
         processed_dataframe["PBoC_Assets_USD_T"] = np.where(
             valid_cnyusd,
-            processed_dataframe["PBoC_Assets_CNY_T"]
-            * processed_dataframe["CNYUSD"],
-            0.0,
+            processed_dataframe["PBoC_Assets_CNY_T"] / cnyusd_fred_raw,
+            np.nan,
         )
 
-        # ACTUALIZACIÓN PARCHE: JPY=X es "yenes por USD", aquí sí se divide.
+        # AUDITORÍA (Directriz 2 - corrección del Bug 0.0): DEXJPUS_FRED es
+        # "JPY por USD" (misma convención que el JPY=X de Yahoo que
+        # reemplaza), así que se sigue DIVIDIENDO; la diferencia es que,
+        # sin dato válido, el componente ahora queda en NaN en vez de 0.0.
         processed_dataframe["JPNASSETS_USD_T"] = np.where(
             valid_jpyusd,
-            processed_dataframe["JPNASSETS_JPY_T"]
-            / processed_dataframe["JPYUSD"],
-            0.0,
+            processed_dataframe["JPNASSETS_JPY_T"] / jpyusd_fred_raw,
+            np.nan,
         )
 
         LOGGER.info(
@@ -1024,11 +1185,11 @@ def calculate_composite_liquidity(
     Si un checkbox se desactiva, ese componente se excluye por completo de
     la suma (no se reemplaza por cero disfrazado: simplemente no participa).
 
-    NOTA (corrección BCE): si un componente activo trae NaN en una fecha
-    puntual (ej. Europa antes de que exista un tipo de cambio EUR/USD
-    válido en cualquiera de las dos fuentes), esa fecha se calcula con el
-    resto de componentes disponibles - el NaN no participa en la suma de
-    esa fecha, en vez de forzar una caída a cero visible en el gráfico.
+    NOTA (corrección BCE, extendida ahora a China/Japón - Directriz 2): si
+    un componente activo trae NaN en una fecha puntual (sin tipo de cambio
+    válido en ninguna fuente), esa fecha se calcula con el resto de
+    componentes disponibles - el NaN no participa en la suma de esa fecha,
+    en vez de forzar una caída a cero visible en el gráfico.
 
     Parameters
     ----------
@@ -1090,14 +1251,15 @@ def calculate_composite_liquidity(
                     )
                     continue
 
-                # NOTA (corrección BCE): fillna(0.0) aquí es correcto y
-                # deliberado - convierte "sin dato válido en esta fecha"
-                # en "no aporta a la suma en esta fecha", que es
-                # exactamente el retro-cálculo pedido (Fed, TGA, RRP siguen
-                # sumando normalmente aunque Europa no tenga un tipo de
-                # cambio válido ese día). Ya no hay un 0.0 fabricado río
-                # arriba en _calculate_component_scales - el NaN que llega
-                # aquí es un NaN genuino.
+                # NOTA (corrección BCE, ahora unificada - Directriz 2):
+                # fillna(0.0) aquí es correcto y deliberado - convierte
+                # "sin dato válido en esta fecha" en "no aporta a la suma
+                # en esta fecha", que es exactamente el retro-cálculo
+                # pedido (Fed, TGA, RRP siguen sumando normalmente aunque
+                # Europa/China/Japón no tengan un tipo de cambio válido ese
+                # día). Ya no hay ningún 0.0 fabricado río arriba en
+                # _calculate_component_scales para NINGÚN componente de
+                # divisa - el NaN que llega aquí es siempre un NaN genuino.
                 component_values = pd.to_numeric(
                     processed_dataframe[column_name], errors="coerce"
                 ).fillna(0.0)
@@ -1348,6 +1510,12 @@ def build_master_dataframe(
     (_prepare_fred_series / _prepare_yahoo_close_series), antes del outer
     merge - ver comentarios en ese módulo para el detalle exacto.
 
+    CORRECCIÓN DE ERROR (extremo derecho del gráfico): tras el merge,
+    _outer_merge_and_align proyecta además el último valor conocido de
+    cada serie no-cripto hasta la fecha más reciente del calendario
+    maestro (ver docstring de esa función) - esto es lo que evita el
+    "desplome a cero" al final del gráfico.
+
     Parameters
     ----------
     api_key : str, optional
@@ -1373,6 +1541,14 @@ def build_master_dataframe(
         usdt_dominance_dataframe = get_usdt_dominance_history()
         if not usdt_dominance_dataframe.empty:
             usdt_dominance_dataframe = _normalize_dates(usdt_dominance_dataframe)
+            # Reindexado + ffill en la raíz, igual criterio que el resto
+            # de series no-cripto, para mantener sus huecos internos
+            # cerrados desde el origen; el relleno hasta la fecha más
+            # reciente del calendario maestro lo completa
+            # _outer_merge_and_align (ver CORRECCIÓN DE ERROR arriba).
+            usdt_dominance_dataframe = _reindex_daily_and_ffill(
+                usdt_dominance_dataframe, "USDT_Dominance"
+            )
 
         all_dataframes = fred_dataframes + yahoo_dataframes + [usdt_dominance_dataframe]
 

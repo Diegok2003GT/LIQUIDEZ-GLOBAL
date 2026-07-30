@@ -1,5 +1,17 @@
 """
 Módulo de descarga, validación y limpieza de datos desde FRED y Yahoo Finance.
+
+AUDITORÍA (Directriz 1 - Eliminación de Yahoo Finance para FX): los tipos de
+cambio EUR/USD, CNY/USD y JPY/USD ya NO se descargan desde Yahoo Finance
+(antes "EURUSD=X", "CNYUSD=X", "JPY=X" en config.YAHOO_TICKERS). Las tres
+series ahora se obtienen exclusivamente vía get_fred_data() (más abajo, sin
+cambios funcionales) usando los tickers oficiales de FRED (DEXUSEU, DEXCHUS,
+DEXJPUS, ver config.FRED_SERIES), lo que elimina el límite fijo de
+YFINANCE_PERIOD="3y" para estas tres series y permite calcular liquidez
+histórica de ciclos macroeconómicos completos (10+ años) sin dejar de usar
+únicamente APIs gratuitas. get_yfinance_data() se conserva sin cambios: sigue
+siendo la única fuente para DXY, BTC-USD, SOL-USD y USDT-USD, que no tienen
+equivalente gratuito en FRED.
 """
 
 import logging
@@ -260,6 +272,12 @@ def get_fred_data(series_id: str, api_key: str) -> pd.DataFrame:
     """
     Descarga observaciones históricas de una serie desde la API oficial de FRED.
 
+    AUDITORÍA (Directriz 1): esta función es genérica por `series_id` y no
+    necesitó ningún cambio para soportar la migración de FX de Yahoo Finance
+    a FRED - simplemente ahora también se le pasan los tickers DEXUSEU,
+    DEXCHUS y DEXJPUS desde math_processor.py, igual que cualquier otra
+    serie FRED (WALCL, ECBASSETSW, etc.).
+
     Parameters
     ----------
     series_id : str
@@ -411,6 +429,12 @@ def get_yfinance_data(ticker: str) -> pd.DataFrame:
     """
     Descarga datos históricos diarios de los últimos tres años desde Yahoo Finance.
 
+    AUDITORÍA (Directriz 1): tras la migración de FX a FRED, esta función ya
+    solo se invoca para DX-Y.NYB (DXY), BTC-USD, SOL-USD y USDT-USD - ninguno
+    tiene equivalente gratuito en FRED. La ventana fija de
+    YFINANCE_PERIOD="3y" sigue existiendo, pero ya no limita ningún tipo de
+    cambio usado en el motor de liquidez.
+
     Parameters
     ----------
     ticker : str
@@ -446,10 +470,12 @@ def get_yfinance_data(ticker: str) -> pd.DataFrame:
         )
 
         if yahoo_dataframe.empty:
-            raise ValueError(
-                f"Yahoo Finance no devolvió datos para el ticker '{normalized_ticker}'. "
-                "Verifica que el símbolo exista y que Yahoo Finance esté disponible."
+            LOGGER.warning(
+                "Yahoo Finance no devolvió datos para el ticker %s.",
+                normalized_ticker,
             )
+            _mark_health(normalized_ticker, ok=False, detail="sin datos")  # ACTUALIZACIÓN PARCHE
+            return _empty_yfinance_dataframe()
 
         cleaned_dataframe = _clean_yfinance_dataframe(yahoo_dataframe)
 
@@ -464,19 +490,9 @@ def get_yfinance_data(ticker: str) -> pd.DataFrame:
 
         return cleaned_dataframe
 
-    except ValueError as error:
-        LOGGER.exception(
-            "Error de validación o disponibilidad al descargar Yahoo Finance (%s). "
-            "Detalle: %s",
-            ticker,
-            error,
-        )
-        _mark_health(str(ticker).upper(), ok=False, detail="validación")  # ACTUALIZACIÓN PARCHE
-        return _empty_yfinance_dataframe()
-
     except Exception as error:
         LOGGER.exception(
-            "Error inesperado al descargar Yahoo Finance (%s). "
+            "Error al descargar datos de Yahoo Finance (%s). "
             "Tipo de error: %s. Detalle: %s",
             ticker,
             type(error).__name__,

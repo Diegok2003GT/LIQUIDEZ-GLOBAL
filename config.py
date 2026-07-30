@@ -36,6 +36,11 @@ FRED_API_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 # no tendrá datos recientes hasta que se conecte una fuente de pago (Trading
 # Economics, CEIC, Wind) o se cargue un CSV manual. No se inventan cifras
 # para rellenar ese hueco.
+#
+# AUDITORÍA (Directriz 4 - Datos Obsoletos): por esta misma razón, el
+# checkbox de China ahora nace APAGADO por defecto (ver
+# LIQUIDITY_REGION_COMPONENTS más abajo) y la interfaz muestra una
+# advertencia explícita junto al checkbox si el usuario decide activarlo.
 FRED_SERIES = {
     "FED_BALANCE_SHEET": "WALCL",
     "TREASURY_GENERAL_ACCOUNT": "WTREGEN",
@@ -53,6 +58,20 @@ FRED_SERIES = {
     #   serie real (y la que ya usa el resto del programa) es ECBASSETSW.
     "US_TREASURY_ACCOUNT_WDTGAL": "WDTGAL",
     "EUR_USD_FRED": "DEXUSEU",
+    # AUDITORÍA (Directriz 1 - Eliminación de Yahoo Finance para FX): antes,
+    # el tipo de cambio CNY/USD y JPY/USD se descargaba de Yahoo Finance
+    # (CNYUSD=X, JPY=X), lo cual limitaba la profundidad histórica a
+    # YFINANCE_PERIOD="3y" (ver más abajo). DEXCHUS y DEXJPUS son las series
+    # oficiales de FRED para estos mismos tipos de cambio, con décadas de
+    # historia real (igual que DEXUSEU ya usado para el euro), y permiten
+    # calcular ciclos macroeconómicos completos (10+ años) sin depender de
+    # Yahoo Finance para ningún tipo de cambio. Ambas son gratuitas.
+    #   - DEXCHUS: Yuanes Chinos por 1 Dólar (unidad: CNY por USD, igual
+    #     convención que JPY=X - se DIVIDE para convertir a USD).
+    #   - DEXJPUS: Yenes Japoneses por 1 Dólar (unidad: JPY por USD, misma
+    #     convención que antes con JPY=X - se DIVIDE para convertir a USD).
+    "CHINA_USD_EXCHANGE": "DEXCHUS",
+    "JAPAN_USD_EXCHANGE": "DEXJPUS",
     # NUEVO: PANEL MACRO-BITCOIN AVANZADO (US10Y, STLFSI4) - series FRED
     # verificadas: DGS10 (rendimiento diario del Tesoro a 10 años, % anual)
     # y STLFSI4 (Índice de Estrés Financiero de San Luis, actualización
@@ -61,12 +80,14 @@ FRED_SERIES = {
     "FINANCIAL_STRESS_INDEX": "STLFSI4",
 }
 
-# ACTUALIZACIÓN PARCHE: se agrega el par JPY_USD para poder convertir
-# JPNASSETS (yenes) a dólares.
+# AUDITORÍA (Directriz 1 - Eliminación de Yahoo Finance para FX): ya NO se
+# descargan EUR_USD, CNY_USD ni JPY_USD desde Yahoo Finance (antes
+# "EURUSD=X", "CNYUSD=X", "JPY=X"). Los tres tipos de cambio ahora vienen
+# exclusivamente de FRED (DEXUSEU, DEXCHUS, DEXJPUS en FRED_SERIES, arriba),
+# lo que elimina el límite fijo de 3 años de Yahoo Finance para estas series.
+# Yahoo Finance se conserva únicamente para lo que no existe en FRED de
+# forma gratuita: el índice DXY y los precios de mercado de BTC/SOL/USDT.
 YAHOO_TICKERS = {
-    "EUR_USD": "EURUSD=X",
-    "CNY_USD": "CNYUSD=X",
-    "JPY_USD": "JPY=X",  # ACTUALIZACIÓN PARCHE - yenes por dólar (USD/JPY)
     "DOLLAR_INDEX": "DX-Y.NYB",
     "BITCOIN": "BTC-USD",
     "SOLANA": "SOL-USD",
@@ -75,6 +96,21 @@ YAHOO_TICKERS = {
 
 YFINANCE_PERIOD = "3y"
 YFINANCE_INTERVAL = "1d"
+
+# AUDITORÍA (Directriz 3 - Point-in-Time Mapping / Publication Lag): WALCL y
+# WDTGAL son series semanales "as of Wednesday" - el valor "del miércoles"
+# no se publica ni se conoce realmente ese mismo día, sino con retraso
+# (típicamente el jueves por la tarde, hora de EE.UU.). Antes de reindexar
+# estas series a un calendario diario continuo (ver
+# math_processor._prepare_fred_series), sus fechas se desplazan
+# PUBLICATION_LAG_DAYS días hacia adelante, de modo que el ffill posterior
+# no le atribuya al miércoles un dato que en la realidad todavía no existía
+# ese día (corrección de Look-Ahead Bias). El resto de las series FRED
+# (ECBASSETSW, DGS10, STLFSI4, DEXUSEU, DEXCHUS, DEXJPUS, etc.) no se
+# desplaza: no se documentó un rezago de publicación equivalente para ellas
+# y desplazarlas sin evidencia sería introducir un supuesto no verificado.
+PUBLICATION_LAG_DAYS = 1
+PUBLICATION_LAG_COLUMNS = {"WALCL", "WDTGAL"}
 
 # ACTUALIZACIÓN PARCHE: configuración del Motor de Cálculo de Liquidez
 # Compuesta (Requerimiento 1). Cada componente define:
@@ -104,6 +140,12 @@ LIQUIDITY_BASE_COMPONENTS = {
     },
 }
 
+# AUDITORÍA (Directriz 4 - Datos Obsoletos): el checkbox de China nace
+# APAGADO por defecto ("default": False) porque MYAGM2CNM189N (su única
+# fuente gratuita en FRED) está descontinuada desde agosto de 2019 - ver
+# nota completa junto a FRED_SERIES arriba. CHINA_DATA_DEPRECATED_WARNING,
+# más abajo, es el texto que app.py muestra junto al checkbox si el usuario
+# decide activarlo de todos modos.
 LIQUIDITY_REGION_COMPONENTS = {
     "EUROPA": {
         "label": "Europa (BCE)",
@@ -115,7 +157,7 @@ LIQUIDITY_REGION_COMPONENTS = {
         "label": "China (M2, datos hasta 2019)",
         "column": "PBoC_Assets_USD_T",
         "sign": 1,
-        "default": True,
+        "default": False,  # AUDITORÍA: apagado por defecto - serie descontinuada
     },
     "JAPON": {
         "label": "Japón (BoJ)",
@@ -124,6 +166,18 @@ LIQUIDITY_REGION_COMPONENTS = {
         "default": False,  # apagado por defecto: serie mensual, más lenta
     },
 }
+
+# AUDITORÍA (Directriz 4 - Datos Obsoletos): mensaje de advertencia mostrado
+# en app.py junto al checkbox de China, para que el usuario entienda que
+# activarlo introduce un componente "congelado" desde 2019 (no una serie
+# viva) y puede sesgar la Liquidez Global de forma silenciosa si no se lee
+# esta nota.
+CHINA_DATA_DEPRECATED_WARNING = (
+    "⚠️ MYAGM2CNM189N (M2 de China) está descontinuada en FRED desde "
+    "agosto de 2019. Si activas este componente, sumará un valor "
+    "estancado desde esa fecha en todo el tramo posterior (no una serie "
+    "en vivo) y puede sesgar la Liquidez Global."
+)
 
 # ACTUALIZACIÓN PARCHE: configuración del Sistema de Catalizadores y Retraso
 # (Requerimiento 2). Estos valores son supuestos de trabajo razonables, no
