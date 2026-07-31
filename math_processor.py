@@ -40,6 +40,60 @@ del gráfico):
      fecha más reciente del calendario maestro, sin inventar historia
      nueva ni tocar ninguna fecha anterior al primer dato real de cada
      serie.
+
+AUDITORÍA QUANT (historial de 10+ años, núcleo activo: EE. UU., Europa/BCE,
+DXY, US10Y, MVRV) - resultado de la revisión de este archivo:
+  1. Joins: _outer_merge_and_align (más abajo) usa exclusivamente
+     `pd.merge(..., how="outer")` para unir TODAS las series (WALCL, TGA,
+     RRP, ECBASSET, DEXUSEU_FRED, DXY, DXY_FRED, US10Y, STLFSI4, etc.) -
+     no se encontró ningún `how="inner"` en este archivo. CORRECCIÓN
+     SOBRE LA REVISIÓN ANTERIOR: en la ronda pasada se documentó aquí que
+     el `.dropna(subset=["BTC_Close"])` posterior al merge era
+     "intencional y no destructivo" - esa conclusión fue INCORRECTA. Con
+     YFINANCE_PERIOD="3y", ese dropna sí estaba recortando todo el
+     DataFrame Maestro (incluida la historia de décadas de WALCL/TGA/RRP/
+     ECBASSET/DGS10) a la ventana corta de BTC-USD, causando el recorte
+     visual del gráfico al año ~2023 reportado por el usuario. Esa línea
+     se ELIMINÓ por completo - ver la sección "CORRECCIÓN DE ERROR
+     (recorte visual...)" más abajo para el detalle completo.
+  2. Filtros de fecha: este archivo no agrega ningún `start_date` ni
+     recorte de fecha propio - las descargas las hace data_ingestion.py
+     (ver auditoría en su docstring); math_processor.py solo alinea y
+     transforma lo que llega.
+  3. Extremo temporal / Publication Lag: confirmado que el `.ffill()`
+     final de _outer_merge_and_align (punto 5 de arriba) cubre
+     correctamente la punta de la serie - el desfase de WALCL/WDTGAL
+     (_apply_publication_lag) sigue aplicándose ANTES del reindexado en
+     la raíz, y el relleno hacia la fecha más reciente ocurre DESPUÉS del
+     merge, así que el desfase nunca deja la última fecha del calendario
+     maestro en NaN ni produce caídas verticales a cero.
+
+CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023, reportado
+sobre Plotly a pesar de que los outer joins ya eran correctos en memoria):
+  1. La causa raíz estaba en config.YFINANCE_PERIOD="3y" (ver
+     data_ingestion.py) combinada con `_outer_merge_and_align`, que hacía
+     `merged_dataframe.dropna(subset=["BTC_Close"])` al final del merge.
+     Ese dropna recortaba TODO el DataFrame Maestro - WALCL, TGA, RRP,
+     ECBASSET, DGS10, etc. incluidos - a la ventana de datos de BTC-USD,
+     que con period="3y" eran solo los últimos 3 años.
+  2. Corrección: YFINANCE_PERIOD ahora es "max" (historia completa real
+     de BTC-USD, SOL-USD, USDT-USD y DXY, sin inventar nada) y el
+     `dropna(subset=["BTC_Close"])` se ELIMINÓ por completo de
+     _outer_merge_and_align - el calendario maestro ya no depende de
+     ninguna serie en particular, es la unión natural de todas.
+  3. Efecto colateral corregido en el mismo movimiento: con el calendario
+     maestro ahora extendido a la historia completa de cada serie,
+     podían aparecer fechas anteriores al nacimiento de TODOS los
+     componentes activos de Liquidez_Global (ej. antes de que existiera
+     WALCL en FRED). calculate_composite_liquidity y
+     _apply_smoothing_and_peak_detection se corrigieron para dejar esas
+     fechas en NaN en vez de en 0.0 fabricado - ver comentarios en cada
+     función.
+  4. Doble ingesta del dólar: se agregó DTWEXBGS (Trade Weighted U.S.
+     Dollar Index: Broad, FRED, historia diaria desde 2006) como columna
+     independiente DXY_FRED, sumada al pipeline genérico de FRED (outer
+     join + ffill igual que el resto). DXY (Yahoo) se conserva sin
+     cambios - ninguna de las dos series recorta ni reemplaza a la otra.
 """
 
 import logging
@@ -110,6 +164,13 @@ FRED_COLUMN_MAPPING: Dict[str, str] = {
     # ninguna función existente.
     "US_10Y_TREASURY": "US10Y",
     "FINANCIAL_STRESS_INDEX": "STLFSI4",
+    # AUDITORÍA (Directriz 3 - Doble ingesta del Dólar): DTWEXBGS (dólar
+    # ponderado por comercio, Fed) se descarga y procesa exactamente igual
+    # que cualquier otra serie FRED (reindexado diario + ffill en la raíz,
+    # outer join + ffill final en _outer_merge_and_align). Convive con la
+    # columna DXY (Yahoo Finance) sin reemplazarla: ver nota completa en
+    # config.FRED_SERIES sobre por qué son dos índices distintos.
+    "US_DOLLAR_INDEX_FRED": "DXY_FRED",
 }
 
 # AUDITORÍA (Directriz 1): ya no se descargan EUR_USD, CNY_USD ni JPY_USD
@@ -143,6 +204,7 @@ MASTER_COLUMNS: List[str] = [
     "US10Y",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     "STLFSI4",  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     "DXY",
+    "DXY_FRED",  # AUDITORÍA: Directriz 3 - doble ingesta del dólar (DTWEXBGS)
     "BTC_Close",
     "SOL_Close",
     "USDT_Close",
@@ -807,9 +869,11 @@ def _download_yahoo_dataframes() -> List[pd.DataFrame]:
 
 def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     """
-    Une todos los DataFrames usando outer joins por Date y proyecta el
+    Une todos los DataFrames usando outer joins por Date, proyecta el
     último valor oficial conocido de cada serie no-cripto hasta la fecha
-    más reciente del calendario maestro.
+    más reciente disponible, y conserva la unión completa de fechas de
+    TODAS las series sin recortar el historial a la ventana de ninguna en
+    particular (ver CORRECCIÓN DE ERROR - recorte visual, más abajo).
 
     CORRECCIÓN DE ERROR (desplome a cero en el extremo derecho del
     gráfico): una ronda anterior de esta auditoría eliminó el `.ffill()`
@@ -819,17 +883,16 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     era incorrecta para el EXTREMO DERECHO de la serie: el reindexado en
     la raíz (_reindex_daily_and_ffill) solo cubre el rango [primera fecha,
     última fecha] de CADA serie individual - nunca la extiende más allá de
-    su propia última fecha real. El calendario maestro, en cambio, lo
-    determina BTC-USD (que cotiza 24/7, incluido el día de hoy). Cuando la
-    última fecha real de una serie macro semanal (ej. WALCL, WDTGAL - más
-    aún con el desplazamiento de Publication Lag de la Directriz 3, que
-    empuja esa fecha un poco más hacia el presente pero no la extiende
-    hasta "hoy") queda por detrás del último precio de Bitcoin, esa serie
-    se quedaba en NaN justo en los días más recientes tras el merge. Ese
-    NaN, al pasar por calculate_composite_liquidity (que hace
-    `fillna(0.0)` para tratar "sin dato" como "no participa"), producía
-    una caída vertical falsa de la Liquidez Global en el tramo final del
-    gráfico - el "desplome a cero" reportado.
+    su propia última fecha real. Cuando la última fecha real de una serie
+    macro semanal (ej. WALCL, WDTGAL - más aún con el desplazamiento de
+    Publication Lag de la Directriz 3, que empuja esa fecha un poco más
+    hacia el presente pero no la extiende hasta "hoy") queda por detrás de
+    la fecha más reciente de otras series, esa serie se quedaba en NaN
+    justo en los días más recientes tras el merge. Ese NaN, al pasar por
+    calculate_composite_liquidity (que hace `fillna(0.0)` para tratar "sin
+    dato" como "no participa"), producía una caída vertical falsa de la
+    Liquidez Global en el tramo final del gráfico - el "desplome a cero"
+    reportado.
 
     La corrección reincorpora el `.ffill()` post-merge, pero con un
     propósito distinto y explícito: NO es para rellenar huecos internos
@@ -840,8 +903,23 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
     último dato real disponible, el mismo criterio de forward-fill que ya
     se usa en el resto del programa. Los precios cripto (BTC/SOL/USDT)
     quedan explícitamente excluidos de este relleno: deben conservar
-    únicamente fechas con precio real, para que el calendario maestro siga
-    definido por observaciones reales de Bitcoin.
+    únicamente fechas con precio real.
+
+    CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023): esta
+    función solía terminar con `merged_dataframe.dropna(subset=
+    ["BTC_Close"])`, que ELIMINABA POR COMPLETO cualquier fila (fecha
+    entera) en la que Bitcoin no tuviera un precio real - forzando el
+    calendario maestro a coincidir exactamente con la ventana de datos de
+    BTC-USD en Yahoo Finance, sin importar cuánta historia real tuvieran
+    las demás series (WALCL, TGA, RRP, ECBASSET, DGS10, DXY_FRED, etc.).
+    Esa línea se ELIMINÓ por completo: el calendario maestro final es
+    ahora, sin más recortes, la unión de todas las fechas de todas las
+    series (el resultado natural del outer join). BTC_Close, SOL_Close y
+    USDT_Close simplemente quedan en NaN en las fechas anteriores a su
+    propio primer precio real - Plotly no dibuja esas líneas ahí, pero la
+    fila completa (y por tanto el resto de columnas) permanece intacta y
+    se sigue graficando con su propia historia real. No se inventa ni un
+    dato nuevo, y ya no se destruye ninguno que sí exista.
 
     Parameters
     ----------
@@ -913,18 +991,43 @@ def _outer_merge_and_align(dataframes: List[pd.DataFrame]) -> pd.DataFrame:
                 merged_dataframe[columns_to_forward_fill].ffill()
             )
 
+        # CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023):
+        # antes se hacía `merged_dataframe.dropna(subset=["BTC_Close"])`
+        # aquí, lo que ELIMINABA POR COMPLETO cualquier fila (fecha) en la
+        # que Bitcoin no tuviera un precio real - incluidas todas las
+        # fechas anteriores al inicio de la serie de BTC-USD en Yahoo
+        # Finance. Con YFINANCE_PERIOD="3y" eso ya recortaba el gráfico
+        # entero a 3 años; incluso con period="max" (ver config.py), BTC
+        # solo cotiza desde ~2014-2015, así que ese dropna seguía
+        # borrando décadas de historia real de WALCL/TGA/RRP/ECBASSET/
+        # DGS10/etc. que sí existen desde mucho antes.
+        #
+        # Se elimina esa línea por completo: el calendario maestro final
+        # es ahora la unión de TODAS las fechas de TODAS las series (el
+        # resultado natural del outer join de más arriba), sin recortarlo
+        # a la ventana de ninguna serie en particular. BTC_Close, SOL_Close
+        # y USDT_Close simplemente quedan en NaN en las fechas anteriores a
+        # su propio primer precio real - Plotly no dibuja esas líneas ahí,
+        # pero la fila (y por tanto WALCL, TGA, RRP, ECBASSET_USD_T,
+        # DXY_FRED, DGS10, etc.) permanece intacta y se sigue graficando
+        # con su propia historia real, tal como exige la integridad
+        # matemática del programa: no se inventa ni un dato, y ya no se
+        # destruye ninguno que sí exista.
         if "BTC_Close" not in merged_dataframe.columns:
             LOGGER.error(
-                "BTC_Close no existe; no se puede establecer el calendario cripto."
+                "BTC_Close no existe entre las columnas descargadas; "
+                "continúa el proceso, pero no habrá curva de Bitcoin en "
+                "el gráfico."
             )
-            return _create_empty_master_dataframe()
 
-        merged_dataframe = merged_dataframe.dropna(subset=["BTC_Close"])
         merged_dataframe = merged_dataframe.sort_values(by="Date")
         merged_dataframe = merged_dataframe.reset_index(drop=True)
 
         LOGGER.info(
-            "Alineación completada. Fechas con precio BTC válido: %s.",
+            "Alineación completada sin recortes destructivos. Rango de "
+            "fechas final: %s -> %s. Filas totales: %s.",
+            merged_dataframe["Date"].min() if not merged_dataframe.empty else "N/D",
+            merged_dataframe["Date"].max() if not merged_dataframe.empty else "N/D",
             len(merged_dataframe),
         )
 
@@ -1191,6 +1294,14 @@ def calculate_composite_liquidity(
     componentes disponibles - el NaN no participa en la suma de esa fecha,
     en vez de forzar una caída a cero visible en el gráfico.
 
+    CORRECCIÓN DE ERROR (integridad matemática - "no forzar ceros"): con
+    el calendario maestro ahora extendido a la historia completa de cada
+    serie (ver _outer_merge_and_align), puede haber fechas muy antiguas en
+    las que NINGÚN componente activo tenga todavía un dato real (ej. antes
+    de que existiera WALCL en FRED). Para esas fechas, Liquidez_Global_Cruda
+    queda en NaN en vez de en 0.0 - un cero ahí sería un dato inventado
+    ("liquidez nula"), cuando la realidad es "todavía no hay observación".
+
     Parameters
     ----------
     master_dataframe : pd.DataFrame
@@ -1228,6 +1339,20 @@ def calculate_composite_liquidity(
 
         processed_dataframe = master_dataframe.copy()
         liquidity_accumulator = pd.Series(0.0, index=processed_dataframe.index)
+        # CORRECCIÓN DE ERROR (integridad matemática - "no forzar ceros"):
+        # esta máscara registra, fecha por fecha, si AL MENOS UN
+        # componente activo tenía un dato real (no NaN) ese día. Antes,
+        # con el calendario maestro ahora extendido a la historia completa
+        # de cada serie (ver _outer_merge_and_align), podía haber fechas
+        # muy antiguas en las que NINGÚN componente activo hubiera
+        # empezado a reportarse todavía (ej. antes de que existiera la
+        # serie WALCL en FRED). Sin esta máscara, esas fechas habrían
+        # quedado con Liquidez_Global_Cruda = 0.0 - un cero fabricado que
+        # parecería "liquidez nula" cuando en realidad es "sin dato
+        # disponible todavía". Con la máscara, esas fechas quedan en NaN
+        # (Plotly no dibuja la línea ahí), y solo se calcula un valor real
+        # una vez que al menos un componente activo tiene historia.
+        any_component_has_data = pd.Series(False, index=processed_dataframe.index)
         active_components: List[str] = []
 
         all_components = {**LIQUIDITY_BASE_COMPONENTS, **LIQUIDITY_REGION_COMPONENTS}
@@ -1260,9 +1385,13 @@ def calculate_composite_liquidity(
                 # día). Ya no hay ningún 0.0 fabricado río arriba en
                 # _calculate_component_scales para NINGÚN componente de
                 # divisa - el NaN que llega aquí es siempre un NaN genuino.
-                component_values = pd.to_numeric(
+                raw_component_values = pd.to_numeric(
                     processed_dataframe[column_name], errors="coerce"
-                ).fillna(0.0)
+                )
+                any_component_has_data = (
+                    any_component_has_data | raw_component_values.notna()
+                )
+                component_values = raw_component_values.fillna(0.0)
 
                 liquidity_accumulator = liquidity_accumulator + (sign * component_values)
                 active_components.append(component_key)
@@ -1274,6 +1403,13 @@ def calculate_composite_liquidity(
                     type(error).__name__,
                     error,
                 )
+
+        # CORRECCIÓN DE ERROR: se descarta el 0.0 fabricado en las fechas
+        # sin ningún componente activo con dato real (ver comentario de
+        # any_component_has_data más arriba).
+        liquidity_accumulator = liquidity_accumulator.where(
+            any_component_has_data, other=np.nan
+        )
 
         processed_dataframe["Liquidez_Global_Cruda"] = liquidity_accumulator
 
@@ -1323,10 +1459,23 @@ def _apply_smoothing_and_peak_detection(
 
         processed_dataframe = master_dataframe.copy()
 
+        # CORRECCIÓN DE ERROR (integridad matemática - "no forzar ceros"):
+        # antes este fillna(0.0) convertía en cero cualquier NaN de
+        # Liquidez_Global_Cruda, incluyendo el NaN legítimo que ahora deja
+        # calculate_composite_liquidity en las fechas anteriores a que
+        # exista dato real de cualquier componente activo (ver comentario
+        # de any_component_has_data en esa función). Se usa únicamente
+        # pd.to_numeric(..., errors="coerce") para blindar el tipo de dato
+        # (por si llegara algo no numérico), SIN sustituir los NaN
+        # genuinos por cero. .ewm() y .rolling() (más abajo) manejan NaN
+        # de forma nativa: producen NaN mientras no haya suficiente
+        # historia real, y empiezan a calcular en cuanto aparece el primer
+        # valor válido - exactamente el comportamiento "sin datos
+        # inventados" que exige esta auditoría.
         processed_dataframe["Liquidez_Global_Cruda"] = pd.to_numeric(
             processed_dataframe["Liquidez_Global_Cruda"],
             errors="coerce",
-        ).fillna(0.0)
+        )
 
         # ACTUALIZACIÓN PARCHE: se mantiene también Liquidez_Global (alias)
         # por compatibilidad con cualquier código anterior que la referencie.

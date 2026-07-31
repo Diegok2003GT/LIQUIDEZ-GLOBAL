@@ -6,12 +6,46 @@ cambio EUR/USD, CNY/USD y JPY/USD ya NO se descargan desde Yahoo Finance
 (antes "EURUSD=X", "CNYUSD=X", "JPY=X" en config.YAHOO_TICKERS). Las tres
 series ahora se obtienen exclusivamente vía get_fred_data() (más abajo, sin
 cambios funcionales) usando los tickers oficiales de FRED (DEXUSEU, DEXCHUS,
-DEXJPUS, ver config.FRED_SERIES), lo que elimina el límite fijo de
-YFINANCE_PERIOD="3y" para estas tres series y permite calcular liquidez
-histórica de ciclos macroeconómicos completos (10+ años) sin dejar de usar
-únicamente APIs gratuitas. get_yfinance_data() se conserva sin cambios: sigue
-siendo la única fuente para DXY, BTC-USD, SOL-USD y USDT-USD, que no tienen
-equivalente gratuito en FRED.
+DEXJPUS, ver config.FRED_SERIES). get_yfinance_data() se conserva sin
+cambios funcionales: sigue siendo la única fuente para DXY, BTC-USD,
+SOL-USD y USDT-USD, que no tienen un equivalente EXACTO gratuito en FRED.
+
+AUDITORÍA QUANT (historial de 10+ años, núcleo activo: EE. UU., Europa/BCE,
+DXY, US10Y, MVRV):
+  1. Joins: get_stablecoin_market_cap_history() ya usaba how="outer" (sin
+     cambios). get_usdt_dominance_history() SÍ tenía un how="inner" al
+     cruzar el market cap global con el de USDT (ambos de CoinGecko) -
+     corregido aquí a how="outer" + ffill, para que un desalineamiento
+     puntual entre las dos llamadas a CoinGecko no elimine la fecha
+     completa del historial de USDT.D. NOTA DE ALCANCE: USDT.D no forma
+     parte del núcleo activo (US/Europa/DXY/US10Y/MVRV) y su propia
+     ventana de descarga sigue acotada a 365 días por el parámetro `days`
+     de la API de CoinGecko - esta corrección solo evita una pérdida de
+     datos adicional e innecesaria dentro de esa ventana, no la amplía.
+  2. Filtros ocultos de fecha en FRED: se revisó get_fred_data() y el
+     diccionario `request_parameters` que arma - NO se envía
+     `observation_start`, `observation_end` ni ningún parámetro de
+     fecha o `limit` a la API de FRED (ver la función más abajo). Por
+     defecto, FRED devuelve el historial COMPLETO de la serie (para
+     WALCL, TGA/WTREGEN, RRP/RRPONTSYD y DEXUSEU eso significa décadas de
+     historia real). No se encontró ningún `start_date` ni límite de
+     fecha hardcodeado en este archivo ni en config.py para estas cuatro
+     series.
+
+CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023 en Plotly):
+  1. YFINANCE_PERIOD ya NO es "3y": ahora es "max" (ver config.py). Con
+     esto, get_yfinance_data() descarga toda la historia real disponible
+     de BTC-USD, SOL-USD, USDT-USD y DXY (DX-Y.NYB) sin inventar ni
+     recortar ningún dato - cada serie trae exactamente lo que Yahoo
+     Finance tiene registrado desde su propio primer día de cotización.
+  2. DXY (Yahoo, "DX-Y.NYB") sigue siendo la única fuente para el índice
+     ICE DXY exacto - no existe un sustituto gratuito idéntico en FRED
+     (DTWEXBGS es una canasta y metodología distinta, no un reemplazo).
+     En vez de sustituirlo en silencio, se agregó DTWEXBGS como una
+     SEGUNDA columna independiente (DXY_FRED, ver math_processor.py) que
+     convive con DXY sin recortarlo ni reemplazarlo - así el análisis del
+     dólar tiene tanto el ticker de mercado de corto plazo (DXY) como
+     20+ años de historia gratuita (DXY_FRED).
 """
 
 import logging
@@ -427,13 +461,17 @@ def get_fred_data(series_id: str, api_key: str) -> pd.DataFrame:
 
 def get_yfinance_data(ticker: str) -> pd.DataFrame:
     """
-    Descarga datos históricos diarios de los últimos tres años desde Yahoo Finance.
+    Descarga el historial diario completo disponible desde Yahoo Finance.
 
     AUDITORÍA (Directriz 1): tras la migración de FX a FRED, esta función ya
     solo se invoca para DX-Y.NYB (DXY), BTC-USD, SOL-USD y USDT-USD - ninguno
-    tiene equivalente gratuito en FRED. La ventana fija de
-    YFINANCE_PERIOD="3y" sigue existiendo, pero ya no limita ningún tipo de
-    cambio usado en el motor de liquidez.
+    tiene un equivalente EXACTO gratuito en FRED.
+
+    CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023):
+    YFINANCE_PERIOD ya no es "3y" - ahora es "max" (config.py), así que
+    esta función descarga toda la historia real de cada ticker desde su
+    propio primer día de cotización en Yahoo Finance, sin ningún recorte
+    de ventana fijo.
 
     Parameters
     ----------
@@ -586,11 +624,25 @@ def get_usdt_dominance_history(api_key: str = COINGECKO_API_KEY) -> pd.DataFrame
             tether_dataframe["Timestamp"], unit="ms", errors="coerce"
         ).dt.normalize()
 
+        # AUDITORÍA (Directriz 1 - Joins para el Historial): antes se usaba
+        # how="inner", que descarta silenciosamente cualquier fecha en la
+        # que una de las dos series (market cap global o de USDT) no
+        # tuviera un registro exacto ese día - un desalineamiento de
+        # apenas unas horas entre ambas llamadas a CoinGecko podía
+        # recortar días completos sin ninguna advertencia. Se cambia a
+        # how="outer" + ffill (igual criterio que el resto del pipeline
+        # no-cripto) para que un hueco puntual en una de las dos series se
+        # rellene con su último valor conocido en vez de eliminar la fecha
+        # entera del historial de USDT.D.
         merged_dataframe = pd.merge(
             global_dataframe[["Date", "Global_Market_Cap"]],
             tether_dataframe[["Date", "USDT_Market_Cap"]],
             on="Date",
-            how="inner",
+            how="outer",
+        )
+        merged_dataframe = merged_dataframe.sort_values(by="Date")
+        merged_dataframe[["Global_Market_Cap", "USDT_Market_Cap"]] = (
+            merged_dataframe[["Global_Market_Cap", "USDT_Market_Cap"]].ffill()
         )
 
         merged_dataframe = merged_dataframe.dropna()

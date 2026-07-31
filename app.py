@@ -353,6 +353,28 @@ div[data-baseweb="notification"] { border-radius: 2px !important; }
         -webkit-overflow-scrolling: touch;
     }
 
+    /* ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 1): la modebar de
+       Plotly (zoom, pan, cámara, herramientas de dibujo) se vuelve
+       flotante y mínima en pantallas angostas, en vez de ocupar una
+       franja fija sobre el gráfico. displayModeBar="hover" (config de
+       Python) ya la mantiene oculta hasta que el usuario toca el
+       gráfico; este CSS solo la encoge y la superpone con fondo
+       semitransparente cuando sí aparece, para que nunca empuje ni tape
+       contenido del gráfico. */
+    .js-plotly-plot .plotly .modebar {
+        position: absolute !important;
+        top: 2px !important;
+        right: 2px !important;
+        background: rgba(13, 15, 18, 0.85) !important;
+        border-radius: 4px !important;
+        padding: 1px 2px !important;
+        transform: scale(0.78);
+        transform-origin: top right;
+    }
+    .js-plotly-plot .plotly .modebar-btn {
+        padding: 2px !important;
+    }
+
     /* Sidebar más angosta y con menos padding en móvil */
     [data-testid="stSidebar"] {
         min-width: 82vw !important;
@@ -447,13 +469,46 @@ DEFAULT_PANEL_HEIGHT = 500
 DEFAULT_ASSET_PANEL_HEIGHT = 420
 DEFAULT_LIQUIDITY_PANEL_HEIGHT = 420
 
+# ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 1): configuración global de
+# Plotly, compartida por TODAS las figuras (st.plotly_chart y el embed
+# crudo de render_synced_dual_panel_chart).
+#   - "scrollZoom": True ya cubre AMBOS mundos de forma nativa en
+#     Plotly.js: rueda del ratón en escritorio Y pinch-to-zoom con dos
+#     dedos en pantallas táctiles - no hace falta ninguna bandera aparte
+#     para gestos táctiles.
+#   - "responsive": True hace que Plotly reaccione a cambios de tamaño
+#     del contenedor (rotar el teléfono, colapsar el sidebar, etc.), no
+#     solo al evento resize de la ventana completa.
+#   - "displayModeBar": "hover" hace que la barra de herramientas
+#     (modebar) permanezca oculta hasta que el usuario interactúa con el
+#     gráfico, en vez de ocupar espacio fijo todo el tiempo - en móvil,
+#     donde el ancho es escaso, esto evita que estorbe sobre la esquina
+#     superior del gráfico. El CSS de abajo (INSTITUTIONAL_TERMINAL_CSS,
+#     bloque @media max-width:768px) además la encoge y la vuelve
+#     flotante/semitransparente cuando sí aparece.
 TRADINGVIEW_PLOTLY_CONFIG = {
     "scrollZoom": True,
+    "responsive": True,
     "displaylogo": False,
-    "displayModeBar": True,
+    "displayModeBar": "hover",
     "doubleClick": "reset",
     "modeBarButtonsToAdd": ["drawline", "drawrect", "eraseshape"],
 }
+
+# ACTUALIZACIÓN PARCHE (RENDIMIENTO - Directriz 3): las trazas de línea/
+# precio del Panel Principal y de Señales Macro Avanzadas usan go.Scattergl
+# (WebGL) en vez de go.Scatter (SVG/Canvas del hilo principal). Con 10+
+# años de historia diaria, cada traza puede tener miles de puntos;
+# go.Scattergl delega el dibujo a la GPU vía WebGL, lo que evita que el
+# navegador bloquee la interacción (arrastrar, hacer zoom, hover) al
+# recibir figuras grandes. Es un reemplazo directo de la API - mismos
+# parámetros (x, y, mode, line, marker, fill, hovertemplate, etc.) - así
+# que ningún gráfico cambia visualmente, solo la forma en que se renderiza.
+#
+# EXCEPCIÓN DELIBERADA: build_advanced_index_synced_figure (pestaña
+# "Liquidez Avanzada") usa go.Scatter clásico, no Scattergl - ver su
+# docstring para el detalle del glitch de panning que motivó revertirlo
+# ahí específicamente.
 
 GUIDE_LINE_TARGETS = ("Panel de Liquidez", "Panel de Precio")
 
@@ -465,6 +520,210 @@ DEFAULT_VERTICAL_AMPLIFICATION = 1.0
 MIN_VERTICAL_AMPLIFICATION = 0.5
 MAX_VERTICAL_AMPLIFICATION = 6.0
 Y_AUTOSCALE_PADDING_RATIO = 0.08  # 8% de aire arriba/abajo del rango visible
+
+# =====================================================================
+# ACTUALIZACIÓN PARCHE (RENDIMIENTO - Rango de Fechas / Directriz 1, 2 y 3)
+# =====================================================================
+# DIAGNÓSTICO: con el historial ahora extendido a 10+ años (Bitcoin desde
+# ~2014, liquidez desde ~2000/2002), cada rerun de Streamlit - incluido
+# cada clic en un checkbox - reconstruía las figuras de Plotly con miles
+# de puntos por traza y, sobre todo, con cientos de rectángulos de
+# sombreado de picos (_add_peak_shading llama a figure.add_vrect() una vez
+# por cada episodio de pico detectado en TODO el historial). Eso es lo que
+# se sentía como "se congela": no era la descarga de datos (ya estaba
+# cacheada con @st.cache_data desde antes), sino la cantidad de objetos
+# que Plotly tenía que serializar y que el navegador tenía que dibujar en
+# cada rerun.
+#
+# SOLUCIÓN: un selector de rango de fechas por panel que recorta el
+# DataFrame a la ventana visible SOLO para el paso de graficado. El
+# recorte ocurre SIEMPRE después de calcular EMA/SMA/Z-Score/RoC sobre el
+# historial completo (para que el primer punto visible no arranque con una
+# media móvil a medio calentar), y es una operación de indexado booleano
+# en memoria (`df[mask]`) - no vuelve a descargar ni a recalcular nada
+# desde cero, así que es prácticamente instantánea incluso con miles de
+# filas de por medio.
+DEFAULT_HISTORY_YEARS = 4
+
+
+def _resolve_default_date_range(dataframe: pd.DataFrame) -> Tuple[date, date]:
+    """
+    Calcula los límites [mínimo, máximo] disponibles para el selector de
+    rango de fechas, a partir de los datos realmente cargados.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        DataFrame con una columna Date ya normalizada.
+
+    Returns
+    -------
+    Tuple[date, date]
+        (fecha_minima_disponible, fecha_maxima_disponible).
+    """
+    try:
+        if dataframe.empty or "Date" not in dataframe.columns:
+            today = date.today()
+            return today - timedelta(days=365 * DEFAULT_HISTORY_YEARS), today
+
+        min_date = pd.Timestamp(dataframe["Date"].min()).date()
+        max_date = pd.Timestamp(dataframe["Date"].max()).date()
+
+        return min_date, max_date
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al calcular el rango de fechas disponible. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        today = date.today()
+        return today - timedelta(days=365 * DEFAULT_HISTORY_YEARS), today
+
+
+def render_date_range_control(
+    dataframe: pd.DataFrame,
+    widget_key: str,
+    label: str = "📅 Rango histórico visible en esta vista",
+) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Renderiza, en el ÁREA PRINCIPAL (NO en el sidebar) de la pestaña que lo
+    invoque, un selector de rango de fechas (Directriz 1 - Rendimiento),
+    con valor inicial acotado a los últimos DEFAULT_HISTORY_YEARS años,
+    sin importar cuánta historia real haya disponible en el DataFrame.
+
+    UI/UX (corrección solicitada): este control vive fuera de
+    `st.sidebar` a propósito - el sidebar de este programa está reservado
+    para las herramientas exclusivas del Panel Principal (checkboxes del
+    motor de liquidez, activo a comparar, etc.). Cada pestaña
+    (render_main_dashboard, render_advanced_liquidity_tab,
+    render_macro_signals_tab) llama a esta función UNA VEZ, cerca de la
+    parte superior de su propia vista, con un `widget_key` distinto - así
+    cada selector guarda su propio estado en `st.session_state` bajo una
+    key única (`f"{widget_key}_date_range"`) y cambiar el rango en una
+    pestaña nunca afecta a las demás.
+
+    Esta sigue siendo la pieza central de la mejora de rendimiento: reduce
+    de raíz la cantidad de puntos y de sombreados de picos que Plotly debe
+    renderizar por defecto, sin descartar ni un solo dato del DataFrame
+    Maestro cacheado - el usuario puede ampliar la ventana en cualquier
+    momento con este mismo control.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        DataFrame ya cargado (o derivado), con columna Date, usado
+        únicamente para acotar los límites min/max del selector.
+    widget_key : str
+        Prefijo único de session_state para este selector (un control por
+        pestaña, para no compartir estado entre pestañas independientes).
+    label : str
+        Texto mostrado sobre el selector.
+
+    Returns
+    -------
+    Tuple[pd.Timestamp, pd.Timestamp]
+        (fecha_inicio, fecha_fin) elegidas, como pd.Timestamp normalizados
+        listos para usarse en _filter_dataframe_by_date_range.
+    """
+    try:
+        min_available_date, max_available_date = _resolve_default_date_range(dataframe)
+
+        default_start_date = max(
+            min_available_date,
+            max_available_date - timedelta(days=365 * DEFAULT_HISTORY_YEARS),
+        )
+
+        selected_range = st.date_input(
+            label,
+            value=(default_start_date, max_available_date),
+            min_value=min_available_date,
+            max_value=max_available_date,
+            key=f"{widget_key}_date_range",
+            help=(
+                f"Por defecto se muestran los últimos {DEFAULT_HISTORY_YEARS} "
+                "años para mantener la interfaz ágil. Los indicadores "
+                "(EMA, SMA, Z-Score) siempre se calculan sobre el "
+                "historial COMPLETO antes de este recorte - ampliar el "
+                "rango solo cambia cuánto se dibuja, nunca las cuentas."
+            ),
+        )
+
+        if isinstance(selected_range, tuple) and len(selected_range) == 2:
+            range_start_date, range_end_date = selected_range
+        else:
+            # El usuario todavía no cerró el rango (solo eligió un extremo);
+            # se usa el default mientras tanto para no romper el gráfico.
+            range_start_date, range_end_date = default_start_date, max_available_date
+
+        if range_start_date > range_end_date:
+            range_start_date, range_end_date = range_end_date, range_start_date
+
+        return pd.Timestamp(range_start_date), pd.Timestamp(range_end_date)
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al renderizar el selector de rango de fechas. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        fallback_end_date = pd.Timestamp(date.today())
+        fallback_start_date = fallback_end_date - pd.Timedelta(
+            days=365 * DEFAULT_HISTORY_YEARS
+        )
+        return fallback_start_date, fallback_end_date
+
+
+def _filter_dataframe_by_date_range(
+    dataframe: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Recorta el DataFrame a la ventana de fechas visible, DESPUÉS de que
+    todos los indicadores (EMA, SMA, Z-Score, RoC) ya se calcularon sobre
+    el historial completo. Es un filtrado puro en memoria (indexado
+    booleano de Pandas) - nunca vuelve a descargar ni a recalcular nada,
+    por lo que es prácticamente instantáneo sin importar cuántos años de
+    historia tenga el DataFrame de entrada.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        DataFrame ya procesado (indicadores ya calculados sobre el
+        historial completo).
+    start_date : pd.Timestamp
+        Fecha de inicio del rango visible (inclusive).
+    end_date : pd.Timestamp
+        Fecha de fin del rango visible (inclusive).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copia recortada, con el índice reseteado, lista para graficar.
+    """
+    try:
+        if dataframe.empty or "Date" not in dataframe.columns:
+            return dataframe
+
+        visibility_mask = (
+            (dataframe["Date"] >= start_date) & (dataframe["Date"] <= end_date)
+        )
+        filtered_dataframe = dataframe.loc[visibility_mask].copy()
+        filtered_dataframe = filtered_dataframe.reset_index(drop=True)
+
+        return filtered_dataframe
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error al filtrar el DataFrame por rango de fechas. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return dataframe
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1165,7 +1424,7 @@ def create_main_figure(
 
         # ACTUALIZACIÓN PARCHE: línea de Liquidez Global cruda en escalones.
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Cruda_Desfasada"],
                 mode="lines",
@@ -1188,7 +1447,7 @@ def create_main_figure(
 
         # Traza sin modificar respecto al original: Liquidez Suavizada (EMA).
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Desfasada"],
                 mode="lines",
@@ -1208,7 +1467,7 @@ def create_main_figure(
         )
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe[asset_column],
                 mode="lines",
@@ -1277,18 +1536,28 @@ def create_main_figure(
             height=650,
             hovermode="x unified",
             dragmode="pan",  # MEJORA TRADINGVIEW: arrastrar = desplazar tiempo, no dibujar zoom-box
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada DEBAJO del gráfico (y negativo = por
+            # debajo del área de trazado), en vez de anclada arriba a la
+            # derecha - en pantallas angostas, una leyenda horizontal
+            # arriba-derecha con varios ítems se corta o se superpone al
+            # título; abajo-centrada siempre tiene todo el ancho
+            # disponible para envolver en varias líneas sin tapar nada.
             legend={
                 "orientation": "h",
-                "yanchor": "bottom",
-                "y": 1.02,
-                "xanchor": "right",
-                "x": 1,
+                "yanchor": "top",
+                "y": -0.18,
+                "xanchor": "center",
+                "x": 0.5,
             },
+            # Márgenes laterales al mínimo (aprovechar el ancho angosto de
+            # un teléfono) y margen inferior ampliado para dejarle sitio a
+            # la leyenda ahora reubicada debajo del eje X.
             margin={
                 "l": 10,
                 "r": 10,
                 "t": 80,
-                "b": 10,
+                "b": 70,
             },
             # MEJORA TRADINGVIEW: color de las formas dibujadas con las
             # herramientas nativas de la barra de Plotly (drawline/drawrect).
@@ -1358,7 +1627,7 @@ def create_liquidity_only_figure(
         figure = go.Figure()
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Cruda_Desfasada"],
                 mode="lines",
@@ -1369,7 +1638,7 @@ def create_liquidity_only_figure(
         )
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Desfasada"],
                 mode="lines",
@@ -1391,8 +1660,11 @@ def create_liquidity_only_figure(
             height=panel_height,
             hovermode="x unified",
             dragmode="pan",  # MEJORA TRADINGVIEW
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
-            margin={"l": 10, "r": 10, "t": 60, "b": 10},
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada debajo del gráfico, ver nota completa en
+            # create_main_figure.
+            legend={"orientation": "h", "yanchor": "top", "y": -0.25, "xanchor": "center", "x": 0.5},
+            margin={"l": 10, "r": 10, "t": 60, "b": 55},
             newshape={"line": {"color": st.session_state.get("guide_line_color", "#FFFFFF")}},
         )
         # MEJORA TRADINGVIEW: rango dinámico (no corta el desfase) + drag/zoom nativo.
@@ -1444,7 +1716,7 @@ def create_asset_only_figure(
 
         figure = go.Figure()
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe[asset_column],
                 mode="lines",
@@ -1464,8 +1736,11 @@ def create_asset_only_figure(
             height=panel_height,
             hovermode="x unified",
             dragmode="pan",  # MEJORA TRADINGVIEW
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
-            margin={"l": 10, "r": 10, "t": 60, "b": 10},
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada debajo del gráfico, ver nota completa en
+            # create_main_figure.
+            legend={"orientation": "h", "yanchor": "top", "y": -0.25, "xanchor": "center", "x": 0.5},
+            margin={"l": 10, "r": 10, "t": 60, "b": 55},
             newshape={"line": {"color": st.session_state.get("guide_line_color", "#FFFFFF")}},
         )
         # MEJORA TRADINGVIEW: mismo rango de fechas que el panel de liquidez
@@ -1562,7 +1837,7 @@ def build_synced_dual_panel_figure(
         row2_trace_indices: List[int] = []
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe[asset_column],
                 mode="lines",
@@ -1580,7 +1855,7 @@ def build_synced_dual_panel_figure(
         trace_index += 1
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Cruda_Desfasada"],
                 mode="lines",
@@ -1602,7 +1877,7 @@ def build_synced_dual_panel_figure(
         trace_index += 1
 
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=chart_dataframe["Date"],
                 y=chart_dataframe["Liquidez_Desfasada"],
                 mode="lines",
@@ -1632,8 +1907,11 @@ def build_synced_dual_panel_figure(
             plot_bgcolor="#0E1117",
             height=total_height,
             showlegend=True,
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.0},
-            margin={"l": 10, "r": 10, "t": 40, "b": 10},
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada debajo de TODA la figura (ambas filas),
+            # no arriba - ver nota completa en create_main_figure.
+            legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "center", "x": 0.5},
+            margin={"l": 10, "r": 10, "t": 40, "b": 60},
             hovermode="x",  # una caja de hover por panel, sincronizadas por X
             dragmode="pan",
             newshape={"line": {"color": st.session_state.get("guide_line_color", "#FFFFFF")}},
@@ -1799,6 +2077,34 @@ def render_synced_dual_panel_chart(
             if (adjusting) {{ return; }}
             applyAutoscale();
         }});
+
+        // ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 1 y 3): este
+        // gráfico se embebe con Plotly.newPlot crudo (no vía
+        // st.plotly_chart), así que use_container_width no aplica aquí -
+        // el div ya tiene width:100%, pero Plotly necesita que se le
+        // avise explícitamente cuándo su contenedor cambió de tamaño
+        // (rotar el teléfono, colapsar/expandir el sidebar de Streamlit,
+        // cambiar de pestaña) para recalcular el layout. config.responsive
+        // ya ayuda con el resize de ventana completa; el ResizeObserver de
+        // aquí cubre además los cambios de ancho que NO disparan un evento
+        // 'resize' de la ventana (como el sidebar colapsándose dentro del
+        // mismo viewport).
+        function resizePlot() {{
+            try {{
+                Plotly.Plots.resize(gd);
+            }} catch (resizeError) {{
+                // Silencioso: un resize fallido no debe romper el gráfico.
+            }}
+        }}
+
+        window.addEventListener('resize', resizePlot);
+
+        if (typeof ResizeObserver !== 'undefined') {{
+            const containerObserver = new ResizeObserver(function() {{
+                resizePlot();
+            }});
+            containerObserver.observe(gd);
+        }}
     }});
 }})();
 </script>
@@ -1848,6 +2154,19 @@ def build_advanced_index_synced_figure(
     Z-Score (Corto Plazo) como el Rate of Change % (Liquidez Global
     Combinada), vía `value_unit_label`/`value_axis_title`/`reference_lines`,
     en vez de asumir siempre Z-Score.
+
+    CORRECCIÓN DE ERROR (UI/UX - glitch visual al arrastrar): las trazas de
+    esta función usan `go.Scatter` (SVG clásico), NO `go.Scattergl`
+    (WebGL). Es la única excepción deliberada en todo el programa: al
+    hacer clic y arrastrar (panning) sobre esta figura con Scattergl, el
+    navegador hacía desaparecer por completo el gráfico durante el
+    arrastre y solo lo volvía a dibujar al soltar el clic - un problema
+    documentado de Plotly.js/WebGL con esta figura de dos filas
+    sincronizadas. Con el filtro de rango de fechas ya activo (4 años por
+    defecto), el volumen de puntos aquí es lo bastante bajo como para que
+    SVG clásico no vuelva a introducir el lag original; el resto de
+    figuras del programa (Panel Principal, Señales Macro) sí se benefician
+    de WebGL y lo conservan.
 
     Parameters
     ----------
@@ -1984,8 +2303,11 @@ def build_advanced_index_synced_figure(
             plot_bgcolor="#0E1117",
             height=total_height,
             showlegend=True,
-            legend={"orientation": "h", "yanchor": "bottom", "y": 1.0},
-            margin={"l": 10, "r": 10, "t": 40, "b": 10},
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada debajo de TODA la figura - ver nota
+            # completa en create_main_figure.
+            legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "center", "x": 0.5},
+            margin={"l": 10, "r": 10, "t": 40, "b": 60},
             hovermode="x",
             dragmode="pan",
             newshape={"line": {"color": st.session_state.get("guide_line_color", "#FFFFFF")}},
@@ -2489,6 +2811,31 @@ def render_main_dashboard() -> None:
 
         render_documentation_panel()  # ACTUALIZACIÓN PARCHE
 
+        # ACTUALIZACIÓN PARCHE (UI/UX - selector de fechas fuera del
+        # sidebar): la carga del DataFrame Maestro se adelanta aquí (ya
+        # está cacheada con @st.cache_data, así que en reruns normales es
+        # prácticamente instantánea) para poder renderizar el selector de
+        # rango de fechas en la parte SUPERIOR del área principal de esta
+        # pestaña, antes que cualquier otro control - el sidebar queda
+        # reservado exclusivamente para las herramientas del Panel
+        # Principal (activo a comparar, checkboxes del motor de liquidez,
+        # desfase, etc.).
+        with st.spinner("Descargando y procesando información macroeconómica..."):
+            master_dataframe, health_report = load_master_dataframe()
+
+        if master_dataframe.empty:
+            st.error(
+                "No fue posible construir el DataFrame Maestro. "
+                "Verifica la API key de FRED, la conexión a internet y la consola."
+            )
+            st.stop()
+
+        range_start_date, range_end_date = render_date_range_control(
+            master_dataframe, widget_key="main_panel"
+        )
+
+        render_health_check_panel(health_report)  # ACTUALIZACIÓN PARCHE
+
         st.sidebar.header("Controles")
 
         selected_asset_label = st.sidebar.radio(
@@ -2550,18 +2897,6 @@ def render_main_dashboard() -> None:
                 )
                 st.sidebar.error("No fue posible limpiar la proyección.")
 
-        with st.spinner("Descargando y procesando información macroeconómica..."):
-            master_dataframe, health_report = load_master_dataframe()
-
-        render_health_check_panel(health_report)  # ACTUALIZACIÓN PARCHE
-
-        if master_dataframe.empty:
-            st.error(
-                "No fue posible construir el DataFrame Maestro. "
-                "Verifica la API key de FRED, la conexión a internet y la consola."
-            )
-            st.stop()
-
         if selected_asset_column not in master_dataframe.columns:
             st.error(
                 f"No existe la serie de precio requerida: {selected_asset_column}."
@@ -2586,6 +2921,23 @@ def render_main_dashboard() -> None:
             base_toggles=base_toggles,
             region_toggles=region_toggles,
         )
+
+        # ACTUALIZACIÓN PARCHE (RENDIMIENTO - Directriz 1): el recorte
+        # ocurre DESPUÉS de recalculate_liquidity (EMA de 14 días y Media
+        # Móvil de 50 ya están calculadas sobre el historial completo) y
+        # ANTES de construir la figura. range_start_date/range_end_date ya
+        # se obtuvieron arriba, del selector renderizado al inicio de esta
+        # vista (ver UI/UX: selector fuera del sidebar).
+        master_dataframe = _filter_dataframe_by_date_range(
+            master_dataframe, range_start_date, range_end_date
+        )
+
+        if master_dataframe.empty:
+            st.warning(
+                "No hay datos en el rango de fechas seleccionado. Amplía "
+                "el selector de rango histórico al inicio de esta pestaña."
+            )
+            st.stop()
 
         selected_chart_date = st.session_state.get("selected_chart_date")
 
@@ -2830,6 +3182,29 @@ def render_advanced_liquidity_tab() -> None:
             "aplanarse ni exagerarse."
         )
 
+        # ACTUALIZACIÓN PARCHE (UI/UX - selector de fechas fuera del
+        # sidebar): se adelanta la carga (ya cacheada, prácticamente
+        # instantánea en reruns normales) para poder mostrar el selector
+        # de rango de fechas al inicio de ESTA pestaña, con su propia
+        # `key` (widget_key="advanced_liquidity_panel") independiente del
+        # Panel Principal y de Señales Macro. El rango elegido aquí se
+        # aplica más abajo, después de calcular RoC/Z-Score sobre el
+        # historial completo.
+        with st.spinner("Descargando y procesando datos de Liquidez Avanzada..."):
+            master_dataframe, health_report = load_master_dataframe()
+            stablecoin_dataframe = load_stablecoin_history()
+
+        if master_dataframe.empty:
+            st.error(
+                "No fue posible construir el DataFrame Maestro. Revisa el "
+                "Panel Principal para más detalle."
+            )
+            return
+
+        adv_range_start_date, adv_range_end_date = render_date_range_control(
+            master_dataframe, widget_key="advanced_liquidity_panel"
+        )
+
         with st.expander("¿CÓMO SE CALCULAN ESTOS ÍNDICES?"):
             st.markdown(
                 """
@@ -2996,17 +3371,6 @@ como tal.
             "cursor sincronizado entre ambos paneles."
         )
 
-        with st.spinner("Descargando y procesando datos de Liquidez Avanzada..."):
-            master_dataframe, health_report = load_master_dataframe()
-            stablecoin_dataframe = load_stablecoin_history()
-
-        if master_dataframe.empty:
-            st.error(
-                "No fue posible construir el DataFrame Maestro. Revisa el "
-                "Panel Principal para más detalle."
-            )
-            return
-
         # NUEVO: Liquidez Global Combinada arma su propia vista semanal
         # (Fed + BCE, RoC); Corto Plazo sigue diario, sin cambios.
         if is_combined_global:
@@ -3034,6 +3398,23 @@ como tal.
                 "activando más componentes, o espera a que se acumule "
                 "más historia (el RoC de 90 días necesita al menos 90 "
                 "días de datos previos)."
+            )
+            return
+
+        # ACTUALIZACIÓN PARCHE (RENDIMIENTO - Directriz 1): el recorte de
+        # fechas ocurre DESPUÉS de construir advanced_dataframe (RoC de 90
+        # días y Z-Score rodante de 52 semanas ya calculados sobre el
+        # historial completo) y ANTES de construir la figura sincronizada.
+        # adv_range_start_date/adv_range_end_date ya se obtuvieron arriba,
+        # del selector renderizado al inicio de esta vista.
+        advanced_dataframe = _filter_dataframe_by_date_range(
+            advanced_dataframe, adv_range_start_date, adv_range_end_date
+        )
+
+        if advanced_dataframe.empty:
+            st.warning(
+                "No hay datos en el rango de fechas seleccionado. Amplía "
+                "el selector de rango histórico al inicio de esta pestaña."
             )
             return
 
@@ -3210,7 +3591,7 @@ def build_macro_signals_synced_figure(
 
         # --- Fila 1: Liquidez Global (Z-Score) + Precio del activo ---
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["Liquidez_Global_Zscore"],
                 mode="lines",
@@ -3224,7 +3605,7 @@ def build_macro_signals_synced_figure(
             row=1, col=1, secondary_y=False,
         )
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["BTC_Close"],
                 mode="lines",
@@ -3250,7 +3631,7 @@ def build_macro_signals_synced_figure(
             ).min()
             marker_y_base = (liquidity_min if pd.notna(liquidity_min) else 0.0) - 0.3
             figure.add_trace(
-                go.Scatter(
+                go.Scattergl(
                     x=signal_dataframe["Date"],
                     y=[marker_y_base] * len(signal_dataframe),
                     mode="markers",
@@ -3273,7 +3654,7 @@ def build_macro_signals_synced_figure(
 
         # --- Fila 2: US10Y + SMA ---
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["US10Y"],
                 mode="lines",
@@ -3285,7 +3666,7 @@ def build_macro_signals_synced_figure(
             row=2, col=1,
         )
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["US10Y_SMA"],
                 mode="lines",
@@ -3298,7 +3679,7 @@ def build_macro_signals_synced_figure(
 
         # --- Fila 3: DXY RoC 90d invertido ---
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["DXY_RoC90_Inv"],
                 mode="lines",
@@ -3314,7 +3695,7 @@ def build_macro_signals_synced_figure(
 
         # --- Fila 4: MVRV Z-Score ---
         figure.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=panel_dataframe["Date"],
                 y=panel_dataframe["MVRV_Zscore"],
                 mode="lines",
@@ -3342,15 +3723,22 @@ def build_macro_signals_synced_figure(
             hovermode="x unified",
             dragmode="pan",
             showlegend=True,
+            # ACTUALIZACIÓN PARCHE (UI/UX MÓVIL - Directriz 2): leyenda
+            # horizontal centrada debajo de las 4 filas - ver nota
+            # completa en create_main_figure. Con varios ítems (US10Y,
+            # SMA, STLFSI4, DXY invertido, MVRV, BTC), anclarla arriba a
+            # la derecha (como antes) la cortaba en pantallas angostas;
+            # centrada abajo, tiene todo el ancho disponible para
+            # envolver en varias líneas.
             legend={
                 "orientation": "h",
-                "yanchor": "bottom",
-                "y": 1.03,
-                "xanchor": "right",
-                "x": 1,
+                "yanchor": "top",
+                "y": -0.06,
+                "xanchor": "center",
+                "x": 0.5,
                 "font": {"size": 10},
             },
-            margin={"l": 10, "r": 10, "t": 90, "b": 10},
+            margin={"l": 10, "r": 10, "t": 90, "b": 50},
         )
 
         figure.update_xaxes(showgrid=False, fixedrange=False)
@@ -3408,6 +3796,28 @@ def render_macro_signals_tab() -> None:
             "gráficos del Panel Principal ni de Liquidez Avanzada."
         )
 
+        # ACTUALIZACIÓN PARCHE (UI/UX - selector de fechas fuera del
+        # sidebar): se adelanta la carga (ya cacheada) para poder mostrar
+        # el selector de rango de fechas al inicio de ESTA pestaña, con su
+        # propia `key` (widget_key="macro_signals_panel") independiente de
+        # las otras dos. El rango elegido aquí se aplica más abajo, solo a
+        # la copia que se envía a Plotly - después de que US10Y_SMA,
+        # STLFSI4 y DXY_RoC90_Inv ya se calcularon sobre todo el historial.
+        with st.spinner("Descargando y alineando datos macro (FRED) y on-chain (MVRV)..."):
+            master_dataframe, health_report = load_master_dataframe()
+            mvrv_dataframe, mvrv_metadata = load_mvrv_zscore_history()
+
+        if master_dataframe.empty:
+            st.error(
+                "No fue posible construir el DataFrame Maestro. Revisa el "
+                "Panel Principal para más detalle."
+            )
+            return
+
+        macro_range_start_date, macro_range_end_date = render_date_range_control(
+            master_dataframe, widget_key="macro_signals_panel"
+        )
+
         asset_label = "Bitcoin (BTC-USD)"
 
         sma_col, _ = st.columns([1, 3])
@@ -3421,17 +3831,6 @@ def render_macro_signals_tab() -> None:
                 key="macro_us10y_sma_weeks",
                 help="Media móvil de mediano/largo plazo para suavizar el ruido diario del US10Y.",
             )
-
-        with st.spinner("Descargando y alineando datos macro (FRED) y on-chain (MVRV)..."):
-            master_dataframe, health_report = load_master_dataframe()
-            mvrv_dataframe, mvrv_metadata = load_mvrv_zscore_history()
-
-        if master_dataframe.empty:
-            st.error(
-                "No fue posible construir el DataFrame Maestro. Revisa el "
-                "Panel Principal para más detalle."
-            )
-            return
 
         panel_dataframe = build_macro_bitcoin_signals_view(
             master_dataframe=master_dataframe,
@@ -3462,8 +3861,24 @@ def render_macro_signals_tab() -> None:
                 "disponible con los umbrales actuales."
             )
 
+        # ACTUALIZACIÓN PARCHE (RENDIMIENTO - Directriz 1): el conteo de
+        # señales de arriba usa el historial COMPLETO a propósito (es un
+        # resumen, no un gráfico). macro_range_start_date/
+        # macro_range_end_date ya se obtuvieron arriba, del selector
+        # renderizado al inicio de esta vista.
+        chart_panel_dataframe = _filter_dataframe_by_date_range(
+            panel_dataframe, macro_range_start_date, macro_range_end_date
+        )
+
+        if chart_panel_dataframe.empty:
+            st.warning(
+                "No hay datos en el rango de fechas seleccionado. Amplía "
+                "el selector de rango histórico al inicio de esta pestaña."
+            )
+            return
+
         synced_figure = build_macro_signals_synced_figure(
-            panel_dataframe=panel_dataframe,
+            panel_dataframe=chart_panel_dataframe,
             asset_label=asset_label,
             us10y_sma_weeks=us10y_sma_weeks,
         )

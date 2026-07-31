@@ -78,6 +78,18 @@ FRED_SERIES = {
     # semanal, se propaga con ffill como el resto de series FRED).
     "US_10Y_TREASURY": "DGS10",
     "FINANCIAL_STRESS_INDEX": "STLFSI4",
+    # AUDITORÍA (Directriz 3 - Doble ingesta del Dólar): DTWEXBGS es el
+    # "Trade Weighted U.S. Dollar Index: Broad, Goods and Services" de la
+    # Reserva Federal (FRED, gratuito, historia diaria desde 2006 - 20+
+    # años). NO es el mismo índice que DXY de Yahoo Finance (metodología y
+    # canasta de monedas distintas: DXY pesa fuertemente el EUR y es de
+    # ICE; DTWEXBGS es una canasta más amplia y diversificada calculada
+    # por la Fed) - por eso conviven como DOS columnas independientes
+    # (DXY y DXY_FRED en math_processor.py), ninguna reemplaza a la otra.
+    # DXY (Yahoo) sirve para el corto plazo con el ticker de mercado que
+    # el usuario ya conoce; DTWEXBGS aporta una historia mucho más larga
+    # y gratuita para el análisis del dólar a 10+ años.
+    "US_DOLLAR_INDEX_FRED": "DTWEXBGS",
 }
 
 # AUDITORÍA (Directriz 1 - Eliminación de Yahoo Finance para FX): ya NO se
@@ -86,7 +98,8 @@ FRED_SERIES = {
 # exclusivamente de FRED (DEXUSEU, DEXCHUS, DEXJPUS en FRED_SERIES, arriba),
 # lo que elimina el límite fijo de 3 años de Yahoo Finance para estas series.
 # Yahoo Finance se conserva únicamente para lo que no existe en FRED de
-# forma gratuita: el índice DXY y los precios de mercado de BTC/SOL/USDT.
+# forma gratuita (con la misma metodología exacta): el índice DXY y los
+# precios de mercado de BTC/SOL/USDT.
 YAHOO_TICKERS = {
     "DOLLAR_INDEX": "DX-Y.NYB",
     "BITCOIN": "BTC-USD",
@@ -94,7 +107,18 @@ YAHOO_TICKERS = {
     "TETHER": "USDT-USD",
 }
 
-YFINANCE_PERIOD = "3y"
+# CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023 - Directriz
+# 1): antes YFINANCE_PERIOD="3y" limitaba BTC-USD, SOL-USD, USDT-USD y DXY
+# a solo los últimos 3 años de historia. Como _outer_merge_and_align (en
+# math_processor.py) definía el calendario maestro únicamente a partir de
+# las fechas con BTC_Close válido, ese límite de 3 años en Yahoo Finance
+# terminaba recortando TODO el gráfico - incluida la Liquidez de la Fed,
+# que en realidad tiene décadas de historia en FRED - a la misma ventana
+# corta de Bitcoin. Con period="max", yfinance descarga toda la historia
+# real disponible de cada ticker (BTC-USD y SOL-USD desde su primer día
+# de cotización; DXY desde el inicio de su serie en Yahoo Finance), sin
+# inventar ni un solo dato.
+YFINANCE_PERIOD = "max"
 YFINANCE_INTERVAL = "1d"
 
 # AUDITORÍA (Directriz 3 - Point-in-Time Mapping / Publication Lag): WALCL y
