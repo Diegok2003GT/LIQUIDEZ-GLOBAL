@@ -24,8 +24,19 @@ from config import (
     COMBINED_LIQUIDITY_MAX_SMA_WEEKS,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     COMBINED_LIQUIDITY_MIN_SMA_WEEKS,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     COMBINED_LIQUIDITY_RESAMPLE_RULE,  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
+    ECB_BSI_FLOW_REF,  # RECONSTRUCCIÓN HISTÓRICA MRR
+    ECB_BSI_MRR_SERIES_KEY,  # RECONSTRUCCIÓN HISTÓRICA MRR
+    ECB_CURRENT_ACCOUNTS_SERIES_KEY,  # NUEVO: VALIDACIÓN LIQEUR
+    ECB_DEPOSIT_FACILITY_SERIES_KEY,  # NUEVO: VALIDACIÓN LIQEUR
+    ECB_MARGINAL_LENDING_FACILITY_SERIES_KEY,  # NUEVO: VALIDACIÓN LIQEUR
+    ECB_MIN_RESERVE_REQUIREMENTS_SERIES_KEY,  # NUEVO: VALIDACIÓN LIQEUR
+    FRED_API_KEY,  # NUEVO: INDICADOR LIQGLOB
+    FRED_SERIES,  # NUEVO: INDICADOR LIQGLOB
     LAG_ACCELERATORS,
     LAG_DECELERATORS,
+    LIQEUR_METHODOLOGY,  # MIGRACIÓN LIQEUR: COMPONENTS (activa) | EXLIQ (legado)
+    LIQGLOB_REGIONS,  # NUEVO: INDICADOR LIQGLOB
+    LIQGLOB_RESAMPLE_RULE,  # NUEVO: INDICADOR LIQGLOB
     LIQUIDITY_BASE_COMPONENTS,
     LIQUIDITY_REGION_COMPONENTS,
     LIQUIDITY_SIGNAL_ZSCORE_THRESHOLD,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
@@ -45,7 +56,21 @@ from advanced_liquidity import (  # NUEVO: LIQUIDEZ GLOBAL COMBINADA
     build_macro_bitcoin_signals_view,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     build_short_term_liquidity_view,
 )
+from liqglob import build_liqglob_index, get_liqglob_source_coverage_report  # NUEVO: INDICADOR LIQGLOB
+from liqeur_validation import (  # VALIDACIÓN METODOLÓGICA DE LIQEUR (permanente)
+    build_liqeur_reconstruction,
+    compare_liqeur_reconstruction_vs_official,
+    compute_validation_status,
+)
+from mp_calendar import update_maintenance_period_calendar  # RECONSTRUCCIÓN HISTÓRICA MRR
+from mrr_historical_reconstruction import (  # RECONSTRUCCIÓN HISTÓRICA MRR
+    build_mrr_historical_daily_series,
+    combine_mrr_sources_with_priority,
+    get_mrr_reconstruction_coverage_report,
+)
 from data_ingestion import (  # NUEVO: LIQUIDEZ AVANZADA
+    get_ecb_liquidity_data,  # NUEVO: INDICADOR LIQGLOB
+    get_fred_data,  # NUEVO: INDICADOR LIQGLOB
     get_mvrv_zscore_history,  # NUEVO: PANEL MACRO-BITCOIN AVANZADO
     get_stablecoin_market_cap_history,
     get_usdt_stablecoin_dominance_history,
@@ -833,6 +858,220 @@ def load_mvrv_zscore_history() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         return pd.DataFrame(columns=["Date", "MVRV_Zscore"]), {
             "fuente_datos": "Sin Datos",
             "fecha_actualizacion": None,
+        }
+
+
+# NUEVO: INDICADOR LIQGLOB - historial de la Liquidez Excedentaria de la
+# Eurozona (ILM.D.U2.C.EXLIQ.U2.EUR, fuente oficial del BCE), cacheado por
+# separado del DataFrame Maestro porque viene de una API distinta a
+# FRED/Yahoo, con su propia cadencia de fallos - mismo criterio que
+# load_stablecoin_history y load_mvrv_zscore_history.
+#
+# CORRECCIÓN DE ERROR (Health Check mostraba "ERROR - sin datos todavía"
+# de forma permanente): ahora se cachea la TUPLA completa (DataFrame,
+# estado real) que devuelve get_ecb_liquidity_data() - la pestaña lee el
+# estado directamente de aquí, no del `health_report` de
+# load_master_dataframe() (que se captura ANTES de que esta función se
+# ejecute y por eso nunca lo reflejaba). Ver docstring de
+# get_ecb_liquidity_data en data_ingestion.py para el detalle completo.
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_liquidity_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial de la serie de Liquidez
+    Excedentaria de la Eurozona directamente desde la API oficial del
+    BCE, junto con su estado real ("OK" o "ERROR - detalle").
+    """
+    try:
+        return get_ecb_liquidity_data()
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar historial de Liquidez Excedentaria del BCE. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+# NUEVO: INDICADOR LIQGLOB - Alineación Temporal por Semana Económica.
+# A diferencia de WALCL/WDTGAL/BTC_Close/SOL_Close (que se leen del
+# DataFrame Maestro ya ffilled), RRP y EUR/USD necesitan llegar a
+# liqglob.py CRUDOS (sin forward-fill previo, con sus huecos reales) para
+# poder aplicar la búsqueda miércoles->martes->lunes dentro de la misma
+# semana - ver liqglob._select_weekly_value_with_fallback. Por eso se
+# descargan aquí de forma independiente (misma fuente/serie de FRED que
+# ya usa math_processor.py, no se inventa nada nuevo), cacheadas por
+# separado igual que el resto de fuentes de esta pestaña.
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_liqglob_rrp_history() -> pd.DataFrame:
+    """
+    Descarga (con caché de 30 min) el historial CRUDO de RRP (RRPONTSYD)
+    desde FRED, sin ningún forward-fill previo.
+    """
+    try:
+        return get_fred_data(series_id=FRED_SERIES["REVERSE_REPO"], api_key=FRED_API_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar historial crudo de RRP para LIQGLOB. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_liqglob_eurusd_history() -> pd.DataFrame:
+    """
+    Descarga (con caché de 30 min) el historial CRUDO de EUR/USD
+    (DEXUSEU) desde FRED, sin ningún forward-fill previo.
+    """
+    try:
+        return get_fred_data(series_id=FRED_SERIES["EUR_USD_FRED"], api_key=FRED_API_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar historial crudo de EUR/USD para LIQGLOB. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"])
+
+
+# =====================================================================
+# VALIDACIÓN METODOLÓGICA DE LIQEUR (Control de Calidad, permanente)
+# =====================================================================
+# CANDADO: estos 4 loaders son 100% aditivos y de SOLO LECTURA. Descargan
+# (con caché de 30 min, igual criterio que el resto de fuentes de esta
+# pestaña) los 4 componentes oficiales del BCE necesarios para
+# liqeur_validation.py. Ninguno participa en el cálculo de LIQGLOB_USD_B
+# ni en el gráfico principal - solo alimentan la sección de Validación
+# Metodológica de LIQEUR (control de calidad permanente, ver más abajo).
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_current_accounts_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial crudo de
+    ILM.D.U2.C.L020100.U2.EUR (Current Accounts) desde el ECB Data Portal.
+    """
+    try:
+        return get_ecb_liquidity_data(series_key=ECB_CURRENT_ACCOUNTS_SERIES_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar Current Accounts para la validación de LIQEUR. "
+            "Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_min_reserve_requirements_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial crudo de
+    ILM.D.U2.C.MRR.U2.EUR (Minimum Reserve Requirements) desde el ECB
+    Data Portal.
+    """
+    try:
+        return get_ecb_liquidity_data(series_key=ECB_MIN_RESERVE_REQUIREMENTS_SERIES_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar Minimum Reserve Requirements para la "
+            "validación de LIQEUR. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_deposit_facility_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial crudo de
+    ILM.D.U2.C.L020200.U2.EUR (Deposit Facility) desde el ECB Data Portal.
+    """
+    try:
+        return get_ecb_liquidity_data(series_key=ECB_DEPOSIT_FACILITY_SERIES_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar Deposit Facility para la validación de "
+            "LIQEUR. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_marginal_lending_facility_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial crudo de
+    ILM.D.U2.C.A050500.U2.EUR (Marginal Lending Facility) desde el ECB
+    Data Portal.
+    """
+    try:
+        return get_ecb_liquidity_data(series_key=ECB_MARGINAL_LENDING_FACILITY_SERIES_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar Marginal Lending Facility para la "
+            "validación de LIQEUR. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+# =====================================================================
+# RECONSTRUCCIÓN HISTÓRICA DE MRR (BSI + Calendario oficial, 2004+)
+# =====================================================================
+# CANDADO: estos 2 loaders son 100% aditivos. Alimentan exclusivamente la
+# combinación que se arma en render_liqglob_tab() antes de llamar a
+# build_liqglob_index() - liqglob.py en sí NO CAMBIA (sigue recibiendo un
+# DataFrame crudo Date/Value de MRR, exactamente como antes; solo cambia
+# CÓMO se construye ese DataFrame en app.py, combinando la fuente
+# oficial ILM.D con esta reconstrucción histórica).
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ecb_bsi_mrr_history() -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga (con caché de 30 min) el historial crudo de
+    BSI.M.U2.N.R.MRR.X.1.A1.3000.Z01.E (Minimum Reserve Requirements,
+    dataset BSI, mensual) - fuente histórica para la reconstrucción de
+    MRR antes de 2024-09-27.
+    """
+    try:
+        return get_ecb_liquidity_data(flow_ref=ECB_BSI_FLOW_REF, series_key=ECB_BSI_MRR_SERIES_KEY)
+    except Exception as error:
+        LOGGER.exception(
+            "Error al cargar BSI-MRR histórico. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Date", "Value"]), f"ERROR - {type(error).__name__}"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_ecb_mp_calendar() -> Tuple[pd.DataFrame, Dict[str, object]]:
+    """
+    Obtiene (con caché de 24h - el calendario de Maintenance Periods
+    prácticamente nunca cambia, ver mp_calendar.py) el calendario oficial
+    combinado (semilla + caché en disco + años faltantes vía scraping
+    validado). Nunca lanza excepción: cualquier fallo queda reflejado en
+    el diccionario de estado, y el calendario devuelto es, como mínimo,
+    lo que ya había validado antes de esta llamada.
+    """
+    try:
+        return update_maintenance_period_calendar()
+    except Exception as error:
+        LOGGER.exception(
+            "Error crítico al actualizar el calendario de Maintenance "
+            "Periods. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        return pd.DataFrame(columns=["Year", "MP", "GCMeetingDate", "StartDate", "EndDate"]), {
+            "origen": "error",
+            "scraping_disponible": False,
+            "error": str(error),
         }
 
 
@@ -3955,15 +4194,809 @@ def render_macro_signals_tab() -> None:
         )
 
 
+# =====================================================================
+# NUEVO: INDICADOR LIQGLOB (LIQUIDEZ GLOBAL: ESTADOS UNIDOS + EUROZONA)
+# =====================================================================
+# CANDADO: esta sección es 100% aditiva y vive en su propia pestaña (la
+# 4ta). No modifica render_main_dashboard, render_advanced_liquidity_tab,
+# render_macro_signals_tab, ni ninguna de las figuras/controles que ya
+# usan - build_advanced_index_synced_figure y render_synced_dual_panel_chart
+# se REUTILIZAN tal cual (mismo crosshair sincronizado, mismo auto-ajuste
+# de eje Y, mismo desfase sin recorte) porque ya son genéricas por
+# columna/DataFrame de entrada.
+
+LIQGLOB_INDEX_COLUMN = "LIQGLOB_USD_B"
+LIQGLOB_INDEX_LABEL = "LIQGLOB (Estados Unidos + Eurozona)"
+DEFAULT_LIQGLOB_ASSET_PANEL_HEIGHT = 420
+DEFAULT_LIQGLOB_INDEX_PANEL_HEIGHT = 420
+
+
+def render_liqglob_tab() -> None:
+    """
+    Renderiza la pestaña LIQGLOB: indicador semanal de liquidez conjunta
+    de Estados Unidos y la Eurozona, en miles de millones de dólares
+    (billions), sin normalizar (sin RoC ni Z-Score) - a diferencia de la
+    Liquidez Global Combinada de la pestaña "Liquidez Avanzada", que sí
+    se sigue calculando exactamente igual que antes y no se toca aquí.
+
+    CORRECCIÓN DE ERROR (salto de liquidez en fin de trimestre) +
+    CAMBIO SIGNIFICATIVO (alineación por semana económica): cada
+    observación se ancla al miércoles de su semana (con fallback a
+    martes/lunes dentro de la misma semana si el miércoles no tiene
+    publicación) para todas sus variables, en vez de tomar el viernes de
+    un resample genérico - ver liqglob.py para el detalle completo.
+
+    MIGRACIÓN DE METODOLOGÍA DE LIQEUR (ver config.LIQEUR_METHODOLOGY y
+    liqglob.py): desde esta actualización, LIQEUR se construye por
+    defecto a partir de sus 4 componentes oficiales del BCE (Current
+    Accounts, Minimum Reserve Requirements, Deposit Facility, Marginal
+    Lending Facility) en vez de depender directamente de la serie
+    consolidada ILM.D.U2.C.EXLIQ.U2.EUR - cuyo historial retroactivo es
+    más limitado. EXLIQ se sigue descargando y se sigue usando, pero
+    ahora únicamente como serie de referencia en la sección "Validación
+    Metodológica de LIQEUR" más abajo, para vigilar de forma continua que
+    la reconstrucción siga coincidiendo con la serie oficial. Revertir a
+    la metodología anterior es tan simple como cambiar
+    config.LIQEUR_METHODOLOGY a "EXLIQ" - ningún archivo más necesita
+    modificarse.
+
+    Checkboxes: Estados Unidos (LIQEEUU) y Eurozona (LIQEUR), cada uno
+    con su propia fórmula independiente (config.LIQGLOB_REGIONS). Incluye
+    su propio selector de "Rango histórico visible en esta vista" y su
+    propio panel de Health Check (con estado real, no una foto obsoleta -
+    ver load_ecb_liquidity_history), con el mismo criterio que el resto
+    de pestañas del programa.
+    """
+    try:
+        render_terminal_section_header("LIQGLOB: LIQUIDEZ GLOBAL (EE.UU. + EUROZONA)", options_label="OPCIONES · LIQGLOB")
+        st.caption(
+            "Suma directa, en miles de millones de USD, de la liquidez "
+            "neta de la Reserva Federal y la Liquidez Excedentaria del "
+            "BCE (convertida a dólares) - sin normalizar, para comparar "
+            "la escala nominal real contra BTC/SOL."
+        )
+
+        with st.spinner("Descargando y procesando datos de LIQGLOB..."):
+            master_dataframe, health_report = load_master_dataframe()
+            rrp_raw_dataframe = load_liqglob_rrp_history()
+            eurusd_raw_dataframe = load_liqglob_eurusd_history()
+            # MIGRACIÓN LIQEUR: los 4 componentes oficiales del BCE son
+            # ahora la fuente ACTIVA de LIQEUR (config.LIQEUR_METHODOLOGY
+            # == "COMPONENTS") - se cargan aquí, antes de construir el
+            # gráfico principal, y se reutilizan más abajo también en la
+            # sección de Validación Metodológica (sin volver a
+            # descargarlos - @st.cache_data ya los tiene en caché).
+            current_accounts_raw, current_accounts_status = load_ecb_current_accounts_history()
+            mrr_raw, mrr_status = load_ecb_min_reserve_requirements_history()
+            deposit_facility_raw, deposit_facility_status = load_ecb_deposit_facility_history()
+            mlf_raw, mlf_status = load_ecb_marginal_lending_facility_history()
+            # EXLIQ: ya NO participa en el cálculo activo de LIQEUR (ver
+            # liqglob._compute_liqeur_weekly_from_components) - se sigue
+            # descargando únicamente como serie de referencia para la
+            # Validación Metodológica, más abajo en esta misma pestaña.
+            ecb_liquidity_dataframe, ecb_health_status = load_ecb_liquidity_history()
+
+            # RECONSTRUCCIÓN HISTÓRICA DE MRR (BSI + calendario oficial,
+            # 2004+): MRR es el único de los 4 componentes cuya versión
+            # diaria (ILM.D) solo tiene historial desde 2024-09-27. Esta
+            # combinación vive ENTERAMENTE aquí, en app.py - liqglob.py
+            # no cambia en absoluto, sigue recibiendo un DataFrame crudo
+            # Date/Value de MRR, exactamente como antes de esta
+            # actualización. Un fallo de cualquiera de estas dos fuentes
+            # (BSI o calendario) nunca degrada el resultado por debajo de
+            # `mrr_raw` solo (combine_mrr_sources_with_priority siempre
+            # prioriza el dato oficial ILM.D cuando existe).
+            bsi_mrr_raw, bsi_mrr_status = load_ecb_bsi_mrr_history()
+            mp_calendar_dataframe, mp_calendar_status = load_ecb_mp_calendar()
+            mrr_historical_daily = build_mrr_historical_daily_series(
+                bsi_mrr_raw, mp_calendar_dataframe
+            )
+            mrr_combined_raw = combine_mrr_sources_with_priority(
+                ilm_daily_mrr_raw=mrr_raw,
+                historical_mrr_daily=mrr_historical_daily,
+            )
+
+        if master_dataframe.empty:
+            st.error(
+                "No fue posible construir el DataFrame Maestro. Revisa el "
+                "Panel Principal para más detalle."
+            )
+            return
+
+        liqglob_range_start_date, liqglob_range_end_date = render_date_range_control(
+            master_dataframe, widget_key="liqglob_panel"
+        )
+
+        with st.expander("¿CÓMO SE CALCULA LIQGLOB?"):
+            st.markdown(
+                """
+**LIQGLOB = LIQEEUU + LIQEUR** (miles de millones de USD, una observación por semana económica)
+
+- **LIQEEUU** (Estados Unidos) = `WALCL - TGA (WDTGAL) - RRP (RRPONTSYD)`,
+  las tres series de la Reserva Federal vía FRED, ya convertidas a la
+  misma unidad (miles de millones de USD).
+- **LIQEUR** (Eurozona) = `(Current Accounts - Minimum Reserve
+  Requirements) + Deposit Facility - Marginal Lending Facility`, la
+  fórmula oficial del BCE aplicada a sus 4 componentes oficiales
+  (ECB Data Portal, dataflow `ILM`), convertida de millones a miles de
+  millones de EUR y luego a USD con el tipo de cambio EUR/USD oficial de
+  FRED (DEXUSEU). **Metodología migrada:** hasta la actualización
+  anterior, LIQEUR se tomaba directamente de la serie consolidada
+  `ILM.D.U2.C.EXLIQ.U2.EUR`; tras una validación empírica (correlación
+  prácticamente perfecta entre ambos cálculos - ver la sección
+  "Validación Metodológica de LIQEUR" más abajo), se migró a calcularla
+  desde sus 4 componentes, que tienen un historial mucho más profundo que
+  la serie consolidada. `EXLIQ` se sigue descargando, pero ahora
+  únicamente como serie de referencia de esa validación - ya no participa
+  en este cálculo.
+- Cada región es togglable de forma independiente con su propio
+  checkbox: al desactivar una, su fórmula completa deja de sumar (no es
+  un componente parcial, son dos fórmulas separadas).
+- **Alineación por semana económica (miércoles):** cada observación
+  representa una única semana, y todas sus variables provienen de esa
+  misma semana. WALCL/TGA (semanales) usan la observación oficial de esa
+  semana; RRP, EUR/USD y los 4 componentes de LIQEUR (diarios) usan el
+  dato real del **miércoles** - si no existe por feriado, se busca el día
+  hábil anterior **dentro de la misma semana** (martes, luego lunes).
+  Nunca se mezcla un dato de una semana con el de otra.
+- **Integridad semanal:** si a una región activa le falta información
+  para calcular su fórmula completa esa semana (para Eurozona: cualquiera
+  de los 4 componentes o el EUR/USD), esa observación simplemente **no se
+  dibuja** (no se rellena con 0 ni se inventa un valor) - queda como un
+  hueco en la línea, nunca como una caída vertical ni una escala
+  aplastada.
+- **Momento de ejecución:** el indicador se recalcula automáticamente en
+  cada carga de la app. Abrir el programa no cambia la fecha económica de
+  cada punto (siempre el miércoles de su semana) - solo determina si el
+  dato oficial de la semana más reciente ya está publicado o todavía no.
+- **Ventana histórica:** las últimas ~600 semanas (~11.5 años),
+  reconstruida automáticamente en cada ejecución - ningún dato se
+  introduce a mano.
+                """
+            )
+
+        st.markdown("### COMPONENTES DE LIQGLOB")
+        st.caption(
+            "Desmarca cualquier región para excluir su fórmula completa "
+            "de la suma - LIQGLOB se recalcula al instante."
+        )
+
+        region_toggles: Dict[str, bool] = {}
+        checkbox_columns = st.columns(len(LIQGLOB_REGIONS))
+        for checkbox_column, (region_key, region_config) in zip(
+            checkbox_columns, LIQGLOB_REGIONS.items()
+        ):
+            session_key = f"liqglob_toggle_{region_key}"
+            if session_key not in st.session_state:
+                st.session_state[session_key] = region_config["default"]
+            with checkbox_column:
+                region_toggles[region_key] = st.checkbox(
+                    region_config["label"],
+                    key=session_key,
+                )
+
+        control_column, restore_column = st.columns([4, 1])
+        with control_column:
+            asset_col, offset_col = st.columns(2)
+            with asset_col:
+                liqglob_asset_label = st.radio(
+                    "Activo a comparar",
+                    options=list(ASSET_OPTIONS.keys()),
+                    key="liqglob_asset_choice",
+                    horizontal=True,
+                )
+                liqglob_asset_column = ASSET_OPTIONS[liqglob_asset_label]
+            with offset_col:
+                liqglob_offset_periods = st.slider(
+                    "Desfase (semanas)",
+                    min_value=0,
+                    max_value=26,
+                    value=0,
+                    step=1,
+                    key="liqglob_offset_slider",
+                    help="Mismo mecanismo anti-recorte que el Panel Principal, en semanas.",
+                )
+
+            if "liqglob_asset_panel_height" not in st.session_state:
+                st.session_state["liqglob_asset_panel_height"] = DEFAULT_LIQGLOB_ASSET_PANEL_HEIGHT
+            if "liqglob_index_panel_height" not in st.session_state:
+                st.session_state["liqglob_index_panel_height"] = DEFAULT_LIQGLOB_INDEX_PANEL_HEIGHT
+
+            height_col1, height_col2 = st.columns(2)
+            with height_col1:
+                st.session_state["liqglob_asset_panel_height"] = st.slider(
+                    f"Alto del panel de {liqglob_asset_label} (px)",
+                    min_value=200,
+                    max_value=700,
+                    value=st.session_state["liqglob_asset_panel_height"],
+                    key="liqglob_asset_height_slider",
+                )
+            with height_col2:
+                st.session_state["liqglob_index_panel_height"] = st.slider(
+                    "Alto del panel de LIQGLOB (px)",
+                    min_value=200,
+                    max_value=700,
+                    value=st.session_state["liqglob_index_panel_height"],
+                    key="liqglob_index_height_slider",
+                )
+        with restore_column:
+            st.write("")
+            st.write("")
+            if st.button("RESTAURAR PROPORCIÓN ORIGINAL", key="liqglob_restore_button"):
+                st.session_state["liqglob_asset_panel_height"] = DEFAULT_LIQGLOB_ASSET_PANEL_HEIGHT
+                st.session_state["liqglob_index_panel_height"] = DEFAULT_LIQGLOB_INDEX_PANEL_HEIGHT
+                st.rerun()
+
+        st.caption(
+            "Igual que en el Panel Principal: rueda del mouse = zoom "
+            "horizontal, arrastrar el eje Y = comprimir/estirar la escala, "
+            "cursor sincronizado entre ambos paneles."
+        )
+
+        # CORRECCIÓN DE ERROR (robustez ante fallos temporales de fuentes):
+        # antes, si una región ACTIVA tenía su fuente cruda completamente
+        # caída en esta carga (ej. HTTP 504 de la API del BCE), la regla de
+        # integridad semanal de liqglob.py invalidaba el 100% de las
+        # semanas del indicador - incluidas todas las semanas donde la
+        # OTRA región (con datos íntegros) sí tenía información real. Esa
+        # regla sigue siendo correcta para huecos puntuales dentro de una
+        # fuente que funciona (ver liqglob._select_weekly_value_with_
+        # fallback) - el problema aparecía solo cuando la fuente entera
+        # fallaba en la descarga misma, no en una semana puntual.
+        #
+        # La corrección vive aquí, en la UI, y NO modifica liqglob.py. La
+        # disponibilidad de Eurozona ahora depende de sus 4 componentes
+        # oficiales del BCE + EUR/USD (metodología activa, "COMPONENTS") o
+        # de EXLIQ + EUR/USD (metodología legado, "EXLIQ") - según
+        # config.LIQEUR_METHODOLOGY, para que este chequeo de robustez
+        # siga siendo válido sin importar cuál metodología esté activa. Si
+        # la fuente cruda de una región activa llega vacía en esta carga,
+        # esa región se excluye SOLO de este cálculo puntual (sin tocar el
+        # checkbox del usuario, que conserva su estado), y se avisa con
+        # claridad, indicando cuál de los componentes fue el que falló.
+        #
+        # NOTA: la disponibilidad de MRR se evalúa sobre `mrr_combined_raw`
+        # (oficial ILM.D + reconstrucción histórica BSI+calendario), no
+        # sobre `mrr_raw` a secas - así, si el ILM.D oficial falla mientras
+        # la reconstrucción histórica sigue cubriendo las fechas
+        # necesarias, Eurozona NO se degrada innecesariamente.
+        if LIQEUR_METHODOLOGY == "EXLIQ":
+            eurozone_source_available = (
+                eurusd_raw_dataframe is not None and not eurusd_raw_dataframe.empty
+                and ecb_liquidity_dataframe is not None and not ecb_liquidity_dataframe.empty
+            )
+        else:
+            eurozone_components_status = {
+                "Current Accounts": current_accounts_raw is not None and not current_accounts_raw.empty,
+                "Minimum Reserve Requirements": mrr_combined_raw is not None and not mrr_combined_raw.empty,
+                "Deposit Facility": deposit_facility_raw is not None and not deposit_facility_raw.empty,
+                "Marginal Lending Facility": mlf_raw is not None and not mlf_raw.empty,
+            }
+            failed_components = [name for name, ok in eurozone_components_status.items() if not ok]
+            eurozone_source_available = (
+                eurusd_raw_dataframe is not None and not eurusd_raw_dataframe.empty
+                and not failed_components
+            )
+            if failed_components:
+                LOGGER.warning(
+                    "Componente(s) del BCE no disponibles en esta carga: %s. "
+                    "Eurozona se excluye temporalmente del gráfico principal.",
+                    failed_components,
+                )
+
+        region_source_available = {
+            "US": rrp_raw_dataframe is not None and not rrp_raw_dataframe.empty,
+            "EUROZONE": eurozone_source_available,
+        }
+
+        effective_region_toggles = dict(region_toggles)
+        degraded_region_labels = []
+        for region_key, source_is_available in region_source_available.items():
+            if effective_region_toggles.get(region_key, True) and not source_is_available:
+                effective_region_toggles[region_key] = False
+                degraded_region_labels.append(
+                    LIQGLOB_REGIONS.get(region_key, {}).get("label", region_key)
+                )
+
+        if degraded_region_labels:
+            st.warning(
+                "⚠️ La fuente de datos de **" + "** y **".join(degraded_region_labels) + "** "
+                "no respondió en esta carga (revisa el Health Check más "
+                "abajo para el detalle de cuál fuente específica falló). "
+                "LIQGLOB se muestra temporalmente solo con las regiones que "
+                "sí tienen datos disponibles ahora mismo - tu selección de "
+                "checkboxes no cambió. Vuelve a cargar la página cuando la "
+                "fuente se recupere para ver el indicador completo de nuevo."
+            )
+
+        liqglob_dataframe = build_liqglob_index(
+            master_dataframe,
+            rrp_raw_dataframe=rrp_raw_dataframe,
+            eurusd_raw_dataframe=eurusd_raw_dataframe,
+            current_accounts_raw_dataframe=current_accounts_raw,
+            min_reserve_requirements_raw_dataframe=mrr_combined_raw,
+            deposit_facility_raw_dataframe=deposit_facility_raw,
+            marginal_lending_facility_raw_dataframe=mlf_raw,
+            ecb_liquidity_dataframe=ecb_liquidity_dataframe,
+            region_toggles=effective_region_toggles,
+        )
+
+        if (
+            liqglob_dataframe.empty
+            or LIQGLOB_INDEX_COLUMN not in liqglob_dataframe.columns
+            or liqglob_dataframe[LIQGLOB_INDEX_COLUMN].dropna().empty
+        ):
+            st.warning(
+                "Todavía no hay suficiente historial para calcular "
+                "LIQGLOB con la configuración actual. Prueba activando "
+                "más regiones, o revisa el panel de Health Check más "
+                "abajo si alguna fuente está fallando."
+            )
+            return
+
+        liqglob_dataframe = _filter_dataframe_by_date_range(
+            liqglob_dataframe, liqglob_range_start_date, liqglob_range_end_date
+        )
+
+        if liqglob_dataframe.empty:
+            st.warning(
+                "No hay datos en el rango de fechas seleccionado. Amplía "
+                "el selector de rango histórico al inicio de esta pestaña."
+            )
+            return
+
+        synced_figure, row1_indices, row2_indices = build_advanced_index_synced_figure(
+            advanced_dataframe=liqglob_dataframe,
+            asset_label=liqglob_asset_label,
+            asset_column=liqglob_asset_column,
+            index_label=LIQGLOB_INDEX_LABEL,
+            index_column=LIQGLOB_INDEX_COLUMN,
+            offset_periods=liqglob_offset_periods,
+            asset_panel_height=st.session_state["liqglob_asset_panel_height"],
+            index_panel_height=st.session_state["liqglob_index_panel_height"],
+            offset_freq=LIQGLOB_RESAMPLE_RULE,
+            value_unit_label="Miles de millones USD",
+            value_axis_title="LIQGLOB (Miles de millones de USD)",
+            reference_lines=[],
+        )
+
+        render_synced_dual_panel_chart(
+            figure=synced_figure,
+            row1_trace_indices=row1_indices,
+            row2_trace_indices=row2_indices,
+            component_height=(
+                st.session_state["liqglob_asset_panel_height"]
+                + st.session_state["liqglob_index_panel_height"]
+            ),
+            asset_amplification=1.0,
+            liquidity_amplification=1.0,
+        )
+
+        with st.expander("ESTADO DE LAS FUENTES DE ESTA PESTAÑA (HEALTH CHECK)"):
+            # El health check se indexa por ID real de fuente: las tres
+            # series de la Fed + el tipo de cambio EUR/USD (health_report
+            # ya las trae, math_processor.py las descarga siempre), los 4
+            # componentes oficiales del BCE (fuente ACTIVA de LIQEUR desde
+            # la migración de metodología - cada uno con su propio estado,
+            # para identificar exactamente cuál falla si alguno falla) y
+            # la serie EXLIQ (ahora solo referencia de validación), cuyo
+            # estado se lee DIRECTO de load_ecb_liquidity_history() (ver
+            # corrección de error en su docstring) - no de health_report,
+            # que puede estar desfasado.
+            relevant_sources = {
+                key: value
+                for key, value in health_report.items()
+                if key in {"WALCL", "WDTGAL", "RRPONTSYD", "DEXUSEU"}
+            }
+            relevant_sources["Current Accounts (fuente activa LIQEUR)"] = current_accounts_status
+            relevant_sources["Minimum Reserve Req. (fuente activa LIQEUR)"] = mrr_status
+            relevant_sources["Deposit Facility (fuente activa LIQEUR)"] = deposit_facility_status
+            relevant_sources["Marginal Lending Facility (fuente activa LIQEUR)"] = mlf_status
+            relevant_sources["ILM.D.U2.C.EXLIQ.U2.EUR (solo referencia de validación)"] = ecb_health_status
+            if not relevant_sources:
+                st.write("Sin información de salud disponible todavía.")
+            for source_name, status in sorted(relevant_sources.items()):
+                if status == "OK":
+                    st.success(f"{source_name}: OK")
+                elif isinstance(status, str) and status.startswith("OK"):
+                    st.warning(f"{source_name}: {status}")
+                else:
+                    st.error(f"{source_name}: {status}")
+
+            # VERIFICACIÓN DE COBERTURA HISTÓRICA REAL (por región): antes
+            # de asumir que una región "empieza tarde" por una fuente que
+            # no tiene historia, se reporta aquí la fecha REAL de la
+            # primera y última observación CRUDA de cada fuente (antes de
+            # cualquier alineación semanal o recorte de ventana) - esto
+            # permite confirmar directamente si el BCE realmente no tiene
+            # datos anteriores a cierta fecha, o si el hueco aparece en
+            # otro punto del procesamiento. Ahora incluye los 4 componentes
+            # (la fuente que realmente determina cuánto se extiende hacia
+            # atrás el histórico de Eurozona).
+            st.markdown("---")
+            st.markdown("**Cobertura histórica real de cada fuente (dato crudo, sin recortar):**")
+            coverage_report = get_liqglob_source_coverage_report(
+                master_dataframe,
+                rrp_raw_dataframe=rrp_raw_dataframe,
+                eurusd_raw_dataframe=eurusd_raw_dataframe,
+                current_accounts_raw_dataframe=current_accounts_raw,
+                min_reserve_requirements_raw_dataframe=mrr_raw,
+                deposit_facility_raw_dataframe=deposit_facility_raw,
+                marginal_lending_facility_raw_dataframe=mlf_raw,
+                ecb_liquidity_dataframe=ecb_liquidity_dataframe,
+            )
+            for source_name, coverage in coverage_report.items():
+                first_date = coverage.get("primer_dato")
+                last_date = coverage.get("ultimo_dato")
+                record_count = coverage.get("registros", 0)
+                if first_date is None or last_date is None:
+                    st.write(f"- **{source_name}**: sin datos crudos disponibles.")
+                else:
+                    st.write(
+                        f"- **{source_name}**: primer dato real "
+                        f"**{first_date.strftime('%Y-%m-%d')}**, último dato real "
+                        f"**{last_date.strftime('%Y-%m-%d')}** "
+                        f"({record_count} observaciones crudas)."
+                    )
+            st.caption(
+                "Si la fecha del primer dato real de una fuente coincide "
+                "con el arranque del tramo visible de esa región en el "
+                "gráfico, la serie oficial correspondiente realmente no "
+                "tiene historia anterior - no es un recorte del programa."
+            )
+
+        # =============================================================
+        # RECONSTRUCCIÓN HISTÓRICA DE MRR (BSI + Calendario BCE, 2004+)
+        # =============================================================
+        # CANDADO: sección de solo lectura, informativa. No participa en
+        # el cálculo - liqglob_dataframe ya se construyó más arriba con
+        # `mrr_combined_raw`. Un fallo total de BSI o del calendario no
+        # afecta esta sección más que en mostrar su propio estado "sin
+        # datos" - el resto de la pestaña sigue funcionando igual (ver
+        # combine_mrr_sources_with_priority: nunca degrada por debajo de
+        # lo que ya ofrecía la serie oficial ILM.D sola).
+        with st.expander("RECONSTRUCCIÓN HISTÓRICA DE MRR (BSI + CALENDARIO BCE, 2004+)"):
+            st.caption(
+                "MRR es el único de los 4 componentes de LIQEUR cuya serie "
+                "diaria oficial (ILM.D.U2.C.MRR.U2.EUR) solo tiene "
+                "historial desde 2024-09-27. Para extender el histórico de "
+                "LIQGLOB antes de esa fecha, este bloque reconstruye MRR "
+                "usando la serie mensual oficial BSI.M.U2.N.R.MRR.X.1.A1."
+                "3000.Z01.E junto con el calendario oficial de Maintenance "
+                "Periods del BCE (2004 en adelante) - nunca por "
+                "aproximación de mes calendario."
+            )
+
+            # --- Estado de la fuente BSI ---
+            if bsi_mrr_status == "OK":
+                st.success(f"BSI.M.U2.N.R.MRR.X.1.A1.3000.Z01.E: {bsi_mrr_status}")
+            elif isinstance(bsi_mrr_status, str) and bsi_mrr_status.startswith("OK"):
+                st.warning(f"BSI.M.U2.N.R.MRR.X.1.A1.3000.Z01.E: {bsi_mrr_status}")
+            else:
+                st.error(f"BSI.M.U2.N.R.MRR.X.1.A1.3000.Z01.E: {bsi_mrr_status}")
+
+            # --- Estado del calendario de Maintenance Periods ---
+            calendar_years_used = mp_calendar_status.get("años_ya_validados_reutilizados", [])
+            calendar_years_added = mp_calendar_status.get("años_agregados_exitosamente", [])
+            calendar_years_failed = mp_calendar_status.get("años_fallidos", {})
+            scraping_disponible = mp_calendar_status.get("scraping_disponible")
+
+            if mp_calendar_dataframe is not None and not mp_calendar_dataframe.empty:
+                calendar_coverage_start = int(mp_calendar_dataframe["Year"].min())
+                calendar_coverage_end = int(mp_calendar_dataframe["Year"].max())
+                calendar_periods_count = len(mp_calendar_dataframe)
+            else:
+                calendar_coverage_start = None
+                calendar_coverage_end = None
+                calendar_periods_count = 0
+
+            if calendar_periods_count == 0:
+                st.error(
+                    "Calendario de Maintenance Periods: ERROR - sin datos "
+                    "disponibles (ni semilla, ni caché, ni scraping exitoso)."
+                )
+            elif scraping_disponible is False:
+                st.warning(
+                    f"Calendario de Maintenance Periods: ADVERTENCIA - el "
+                    f"scraping falló en esta carga, usando caché anterior "
+                    f"(cobertura: {calendar_coverage_start}-{calendar_coverage_end}, "
+                    f"{calendar_periods_count} períodos validados)."
+                )
+            elif calendar_years_failed:
+                st.warning(
+                    f"Calendario de Maintenance Periods: OK con advertencias "
+                    f"- años que no se pudieron validar en esta carga: "
+                    f"{list(calendar_years_failed.keys())}. Cobertura actual: "
+                    f"{calendar_coverage_start}-{calendar_coverage_end} "
+                    f"({calendar_periods_count} períodos validados)."
+                )
+            else:
+                origen_texto = "caché (sin necesidad de scraping)" if not calendar_years_added else (
+                    f"caché + scraping exitoso de: {calendar_years_added}"
+                )
+                st.success(
+                    f"Calendario de Maintenance Periods: OK ({origen_texto}). "
+                    f"Cobertura: {calendar_coverage_start}-{calendar_coverage_end} "
+                    f"({calendar_periods_count} períodos validados)."
+                )
+
+            if mp_calendar_status.get("alerta_posible_cambio_de_formato"):
+                st.error(
+                    "⚠️ El scraper no reprodujo correctamente el calendario "
+                    "de referencia dorada (2014) - posible cambio de "
+                    "formato en el sitio del BCE. Se descartó el resultado "
+                    "nuevo y se sigue usando la última caché válida "
+                    "conocida. Revisar manualmente antes de confiar en "
+                    "años nuevos agregados por scraping."
+                )
+
+            st.markdown(
+                f"**Años ya validados y reutilizados desde caché "
+                f"(nunca se vuelven a descargar):** "
+                f"{calendar_years_used if calendar_years_used else 'ninguno todavía'}"
+            )
+
+            # --- Cobertura de la reconstrucción combinada y transición automática ---
+            reconstruction_coverage = get_mrr_reconstruction_coverage_report(
+                bsi_mrr_raw, mp_calendar_dataframe, mrr_raw
+            )
+            st.markdown("---")
+            st.markdown("**Cobertura de la reconstrucción combinada:**")
+
+            def _format_coverage_date(value):
+                return value.strftime("%Y-%m-%d") if value is not None and pd.notna(value) else "N/D"
+
+            st.write(
+                f"- BSI (crudo, mensual): "
+                f"{_format_coverage_date(reconstruction_coverage.get('bsi_primer_dato'))} a "
+                f"{_format_coverage_date(reconstruction_coverage.get('bsi_ultimo_dato'))} "
+                f"({reconstruction_coverage.get('bsi_registros', 0)} observaciones)."
+            )
+            st.write(
+                f"- Reconstrucción histórica diaria (BSI + calendario): "
+                f"{_format_coverage_date(reconstruction_coverage.get('reconstruccion_historica_primer_dia'))} a "
+                f"{_format_coverage_date(reconstruction_coverage.get('reconstruccion_historica_ultimo_dia'))}."
+            )
+            transition_date = reconstruction_coverage.get("transicion_automatica_detectada_en")
+            st.write(
+                f"- **Punto de transición automática hacia la serie oficial "
+                f"ILM.D.U2.C.MRR.U2.EUR:** {_format_coverage_date(transition_date)} "
+                f"(a partir de esta fecha, la serie oficial siempre tiene "
+                f"prioridad sobre la reconstrucción histórica, sin importar "
+                f"que la reconstrucción también cubra esas fechas)."
+            )
+            st.caption(
+                "Esta reconstrucción es de solo lectura: nunca interpola, "
+                "nunca promedia, nunca inventa un valor donde no hay una "
+                "observación real de BSI dentro del Maintenance Period "
+                "correspondiente - esas semanas simplemente no se dibujan, "
+                "igual criterio que el resto del programa."
+            )
+
+        # =============================================================
+        # VALIDACIÓN METODOLÓGICA DE LIQEUR (Control de Calidad, permanente)
+        # =============================================================
+        # POR QUÉ EXISTE: esta sección nació como una validación puntual
+        # (¿la fórmula oficial del BCE, aplicada a sus 4 componentes
+        # públicos, reproduce la serie consolidada EXLIQ?), y tras
+        # confirmarse empíricamente que sí (correlación prácticamente
+        # perfecta), esa misma fórmula se convirtió en la metodología
+        # ACTIVA de LIQEUR (ver liqglob._compute_liqeur_weekly_from_
+        # components y config.LIQEUR_METHODOLOGY). Esta sección se
+        # conserva de forma PERMANENTE como herramienta de control de
+        # calidad: vigila en cada carga que la metodología activa siga
+        # coincidiendo con la serie oficial EXLIQ, para detectar de
+        # inmediato cualquier cambio futuro en la metodología de
+        # publicación del BCE - sin que nadie tenga que acordarse de
+        # revisarlo manualmente. Ver liqeur_validation.py para el detalle
+        # completo de la metodología, las fórmulas y los umbrales.
+        #
+        # QUÉ COMPARA: LIQEUR_Reconstruida (a partir de los 4 componentes
+        # oficiales del BCE - la misma fórmula que usa el cálculo activo
+        # de LIQGLOB) contra EXLIQ_Oficial (la serie consolidada
+        # ILM.D.U2.C.EXLIQ.U2.EUR, que ya NO participa en el cálculo,
+        # solo en esta comparación), fecha por fecha.
+        #
+        # QUÉ NO ES: esta sección NO calcula ni modifica LIQGLOB. Es una
+        # auditoría paralela e independiente sobre la metodología activa,
+        # que ya se aplicó más arriba en build_liqglob_index().
+        #
+        # CANDADO - INDEPENDENCIA ABSOLUTA (auditado, ver informe de
+        # auditoría entregado junto con esta actualización): este bloque
+        # es de SOLO LECTURA. Desde la migración de metodología, los 4
+        # componentes del BCE y EXLIQ se cargan UNA sola vez, arriba, al
+        # inicio de la función (porque los 4 componentes ahora también
+        # alimentan el gráfico principal) - esta sección los REUTILIZA tal
+        # cual (misma referencia de los DataFrames ya cacheados por
+        # @st.cache_data), sin volver a descargarlos y sin modificarlos.
+        # La independencia funcional se mantiene intacta: `liqglob_dataframe`
+        # ya se construyó más arriba, usando build_liqglob_index() sobre
+        # los DataFrames CRUDOS únicamente - nunca sobre ningún resultado
+        # de esta sección (`liqeur_reconstruction`, `validation_report`,
+        # `validation_status`). Esta sección nunca escribe en
+        # `liqglob_dataframe`, en `region_toggles`/`effective_region_
+        # toggles`, ni en ninguna otra variable usada por el gráfico
+        # principal. Un error aquí dentro (ver el propio try/except de
+        # toda la función) nunca puede afectar el cálculo de LIQGLOB.
+        st.markdown("---")
+        st.markdown("## 🔍 VALIDACIÓN METODOLÓGICA DE LIQEUR")
+        st.caption(
+            "Control de calidad permanente: compara, día a día, la "
+            "metodología ACTIVA de LIQEUR (reconstrucción por los 4 "
+            "componentes oficiales del BCE) contra la serie oficial "
+            "consolidada ILM.D.U2.C.EXLIQ.U2.EUR, que ahora funciona "
+            "únicamente como referencia de validación. Esta sección es de "
+            "solo lectura y no puede modificar el gráfico principal: "
+            "`LIQEUR = (Current Accounts - Minimum Reserve Requirements) "
+            "+ Deposit Facility - Marginal Lending Facility`."
+        )
+
+        with st.expander("ESTADO DE LOS 4 COMPONENTES (HEALTH CHECK)"):
+            component_health = {
+                "Current Accounts - ILM.D.U2.C.L020100.U2.EUR": current_accounts_status,
+                "Minimum Reserve Requirements - ILM.D.U2.C.MRR.U2.EUR": mrr_status,
+                "Deposit Facility - ILM.D.U2.C.L020200.U2.EUR": deposit_facility_status,
+                "Marginal Lending Facility - ILM.D.U2.C.A050500.U2.EUR": mlf_status,
+            }
+            for source_name, status in component_health.items():
+                if status == "OK":
+                    st.success(f"{source_name}: OK")
+                elif isinstance(status, str) and status.startswith("OK"):
+                    st.warning(f"{source_name}: {status}")
+                else:
+                    st.error(f"{source_name}: {status}")
+
+        # SOLO LECTURA: build_liqeur_reconstruction y
+        # compare_liqeur_reconstruction_vs_official reciben DataFrames y
+        # devuelven resultados - no modifican nada fuera de esta función,
+        # y nada de lo que calculan se reutiliza en el gráfico principal.
+        liqeur_reconstruction = build_liqeur_reconstruction(
+            current_accounts_raw=current_accounts_raw,
+            min_reserve_requirements_raw=mrr_raw,
+            deposit_facility_raw=deposit_facility_raw,
+            marginal_lending_facility_raw=mlf_raw,
+        )
+
+        validation_report = compare_liqeur_reconstruction_vs_official(
+            reconstructed_dataframe=liqeur_reconstruction,
+            exliq_official_raw=ecb_liquidity_dataframe,
+        )
+
+        # RESUMEN AUTOMÁTICO DE VALIDACIÓN: el estado (🟢/🟡/🔴/⚪) y el
+        # mensaje se calculan en cada carga a partir de los números reales
+        # del reporte - nunca es un texto fijo. Ver
+        # config.LIQEUR_VALIDATION_STATUS_THRESHOLDS para los umbrales
+        # documentados que definen cada estado.
+        validation_status = compute_validation_status(validation_report)
+
+        status_container = st.container()
+        with status_container:
+            st.markdown(f"### Estado de validación: {validation_status['emoji']} {validation_status['etiqueta']}")
+            if validation_status["codigo"] == "VALIDADA":
+                st.success(validation_status["mensaje"])
+            elif validation_status["codigo"] == "REVISAR":
+                st.warning(validation_status["mensaje"])
+            elif validation_status["codigo"] == "NO_VALIDADA":
+                st.error(validation_status["mensaje"])
+            else:
+                st.info(validation_status["mensaje"])
+
+        if not validation_report.get("disponible"):
+            st.caption(
+                "El Health Check de arriba indica cuál de las 5 fuentes "
+                "(4 componentes + EXLIQ oficial) no respondió en esta carga."
+            )
+        else:
+            first_date = validation_report["primera_fecha"]
+            last_date = validation_report["ultima_fecha"]
+            n_observations = validation_report["n_observaciones"]
+            max_abs_diff = validation_report["max_diferencia_abs"]
+            mean_abs_diff = validation_report["media_diferencia_abs"]
+            mean_pct_diff = validation_report["media_diferencia_pct"]
+            correlation = validation_report["correlacion"]
+
+            st.write(
+                f"**Ventana comparada:** {first_date.strftime('%Y-%m-%d')} a "
+                f"{last_date.strftime('%Y-%m-%d')} — **{n_observations}** "
+                "observaciones donde ambas series (reconstruida y oficial) "
+                "tienen dato real ese mismo día."
+            )
+
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            with metric_col1:
+                st.metric("Diferencia máxima", f"{max_abs_diff:,.0f} M€")
+            with metric_col2:
+                st.metric("Diferencia media", f"{mean_abs_diff:,.0f} M€")
+            with metric_col3:
+                st.metric(
+                    "Diferencia % media",
+                    f"{mean_pct_diff:.4f}%" if pd.notna(mean_pct_diff) else "N/D",
+                )
+            with metric_col4:
+                st.metric(
+                    "Correlación",
+                    f"{correlation:.6f}" if correlation is not None else "N/D",
+                )
+
+            st.markdown("**Fechas con mayor discrepancia absoluta:**")
+            worst_discrepancies = validation_report["peores_discrepancias"].copy()
+            worst_discrepancies["Date"] = worst_discrepancies["Date"].dt.strftime("%Y-%m-%d")
+            worst_discrepancies = worst_discrepancies.rename(
+                columns={
+                    "Date": "Fecha",
+                    "EXLIQ_Oficial": "EXLIQ Oficial (M€)",
+                    "LIQEUR_Reconstruida": "LIQEUR Reconstruida (M€)",
+                    "Diferencia": "Diferencia (M€)",
+                    "Diferencia_Pct": "Diferencia (%)",
+                }
+            )
+            st.dataframe(worst_discrepancies, use_container_width=True, hide_index=True)
+
+            with st.expander("VER GRÁFICO COMPARATIVO (EXLIQ oficial vs LIQEUR reconstruida)"):
+                comparison_series = validation_report["serie_comparada"]
+                comparison_figure = go.Figure()
+                comparison_figure.add_trace(
+                    go.Scatter(
+                        x=comparison_series["Date"],
+                        y=comparison_series["EXLIQ_Oficial"],
+                        mode="lines",
+                        name="EXLIQ Oficial",
+                        line={"color": "#38BDF8", "width": 2},
+                    )
+                )
+                comparison_figure.add_trace(
+                    go.Scatter(
+                        x=comparison_series["Date"],
+                        y=comparison_series["LIQEUR_Reconstruida"],
+                        mode="lines",
+                        name="LIQEUR Reconstruida",
+                        line={"color": "#F59E0B", "width": 2, "dash": "dot"},
+                    )
+                )
+                comparison_figure.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117",
+                    height=400,
+                    showlegend=True,
+                    legend={"orientation": "h", "yanchor": "top", "y": -0.15, "xanchor": "center", "x": 0.5},
+                    margin={"l": 10, "r": 10, "t": 30, "b": 40},
+                    hovermode="x unified",
+                )
+                comparison_figure.update_yaxes(title_text="Millones de EUR")
+                st.plotly_chart(comparison_figure, use_container_width=True)
+
+            st.caption(
+                "Esta validación se recalcula automáticamente en cada "
+                "carga (con caché de 30 min por fuente) - es una "
+                "herramienta de control de calidad permanente, no una "
+                "foto fija. La metodología ACTIVA de LIQGLOB sigue siendo "
+                "la serie oficial EXLIQ; sustituirla seguirá siendo "
+                "siempre una decisión manual y explícita."
+            )
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error crítico en la pestaña LIQGLOB. Tipo: %s. Detalle: %s",
+            type(error).__name__,
+            error,
+        )
+        st.error(
+            "Ocurrió un error crítico al ejecutar la pestaña LIQGLOB. "
+            "Consulta la consola para ver el detalle técnico."
+        )
+
+
 def main() -> None:
     """
     Punto de entrada de la aplicación: organiza el Panel Principal, la
-    pestaña de Liquidez Avanzada y la nueva pestaña de Señales Macro
-    Avanzadas como pestañas independientes del mismo programa (NUEVO:
-    LIQUIDEZ AVANZADA / NUEVO: PANEL MACRO-BITCOIN AVANZADO).
+    pestaña de Liquidez Avanzada, la pestaña de Señales Macro Avanzadas y
+    la nueva pestaña LIQGLOB como pestañas independientes del mismo
+    programa (NUEVO: LIQUIDEZ AVANZADA / NUEVO: PANEL MACRO-BITCOIN
+    AVANZADO / NUEVO: INDICADOR LIQGLOB).
     """
-    tab_main, tab_advanced, tab_macro_signals = st.tabs(
-        ["PANEL PRINCIPAL", "LIQUIDEZ AVANZADA", "SEÑALES MACRO AVANZADAS"]
+    tab_main, tab_advanced, tab_macro_signals, tab_liqglob = st.tabs(
+        ["PANEL PRINCIPAL", "LIQUIDEZ AVANZADA", "SEÑALES MACRO AVANZADAS", "LIQGLOB"]
     )
 
     with tab_main:
@@ -3974,6 +5007,9 @@ def main() -> None:
 
     with tab_macro_signals:
         render_macro_signals_tab()
+
+    with tab_liqglob:
+        render_liqglob_tab()
 
 
 if __name__ == "__main__":

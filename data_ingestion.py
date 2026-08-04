@@ -48,6 +48,7 @@ CORRECCIÓN DE ERROR (recorte visual del gráfico al año ~2023 en Plotly):
      20+ años de historia gratuita (DXY_FRED).
 """
 
+import io  # NUEVO: INDICADOR LIQGLOB - parseo de CSV devuelto por la API del BCE
 import logging
 import os
 import time
@@ -63,6 +64,9 @@ from config import (
     COINGECKO_API_KEY,
     DEFILLAMA_STABLECOIN_HISTORY_URL,  # NUEVO: LIQUIDEZ AVANZADA
     DEFILLAMA_STABLECOINS_LIST_URL,  # NUEVO: LIQUIDEZ AVANZADA
+    ECB_LIQUIDITY_FLOW_REF,  # NUEVO: INDICADOR LIQGLOB
+    ECB_LIQUIDITY_SERIES_KEY,  # NUEVO: INDICADOR LIQGLOB
+    ECB_SDW_BASE_URL,  # NUEVO: INDICADOR LIQGLOB
     FRED_API_BASE_URL,
     FRED_API_KEY,
     FRED_SERIES,
@@ -457,6 +461,185 @@ def get_fred_data(series_id: str, api_key: str) -> pd.DataFrame:
         )
         _mark_health(series_id, ok=False, detail="inesperado")  # ACTUALIZACIÓN PARCHE
         return _empty_fred_dataframe()
+
+
+# NUEVO: INDICADOR LIQGLOB - descarga de la serie oficial de Liquidez
+# Excedentaria de la Eurozona directamente desde la API pública del BCE
+# (ECB Data Portal / SDW API), sin API key. Esta serie (ILM.D.U2.C.EXLIQ.
+# U2.EUR) es distinta de ECBASSETSW (la que ya usa la Liquidez Global
+# Combinada, vía FRED) - se pidió explícitamente esta otra serie, tomada
+# de la fuente oficial del BCE, no de FRED.
+#
+# CORRECCIÓN DE ERROR (Health Check mostraba "ERROR - sin datos todavía"
+# incluso cuando la descarga sí funcionaba): esta función se invoca desde
+# app.py en una llamada cacheada SEPARADA de load_master_dataframe()
+# (build_master_dataframe(), que es la que arma `health_report`). Como
+# `health_report` es una FOTO tomada ANTES de que esta función se
+# ejecute, nunca llegaba a reflejar su resultado real - exactamente el
+# mismo problema ya documentado y corregido para el MVRV Z-Score (ver
+# get_mvrv_zscore_history). La corrección es la misma: en vez de que la
+# interfaz dependa de DATA_HEALTH/health_report para esta fuente, la
+# función devuelve su propio estado real en el segundo elemento de la
+# tupla - la UI lo lee directo de aquí, sin importar el orden de llamadas
+# entre pestañas/cachés. DATA_HEALTH se sigue actualizando igual (por si
+# algún otro consumidor lo necesita), pero ya no es la fuente de verdad
+# para el Health Check de esta serie.
+def get_ecb_liquidity_data(
+    flow_ref: str = ECB_LIQUIDITY_FLOW_REF,
+    series_key: str = ECB_LIQUIDITY_SERIES_KEY,
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Descarga observaciones históricas de una serie del BCE (ECB Data
+    Portal / SDW API), en formato CSV, y las estandariza a la misma
+    estructura Date/Value que get_fred_data() (reutiliza los mismos
+    helpers de limpieza, sin duplicar esa lógica).
+
+    Parameters
+    ----------
+    flow_ref : str
+        Flujo (dataflow) del BCE, por ejemplo "ILM". Por defecto
+        ECB_LIQUIDITY_FLOW_REF de config.py.
+    series_key : str
+        Clave de la serie dentro de ese flujo, por ejemplo
+        "D.U2.C.EXLIQ.U2.EUR". Por defecto ECB_LIQUIDITY_SERIES_KEY.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, str]
+        DataFrame con las columnas Date y Value (mismo formato que
+        get_fred_data; vacío ante cualquier error - nunca se inventa un
+        valor), y el estado REAL de esta descarga ("OK" o
+        "ERROR - detalle"), listo para mostrarse tal cual en el Health
+        Check sin depender de ningún diccionario global.
+    """
+    health_label = f"{flow_ref}.{series_key}"
+
+    try:
+        if not isinstance(flow_ref, str) or not flow_ref.strip():
+            raise ValueError("flow_ref debe ser un texto no vacío.")
+        if not isinstance(series_key, str) or not series_key.strip():
+            raise ValueError("series_key debe ser un texto no vacío.")
+
+        request_url = f"{ECB_SDW_BASE_URL}/{flow_ref.strip()}/{series_key.strip()}"
+        request_parameters = {"format": "csvdata"}
+
+        LOGGER.info(
+            "Iniciando descarga ECB SDW para la serie: %s.", health_label
+        )
+
+        response = requests.get(
+            request_url,
+            params=request_parameters,
+            headers={"Accept": "text/csv"},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        raw_text = response.text
+
+        if not raw_text or not raw_text.strip():
+            raise ValueError(
+                "La API del BCE devolvió una respuesta vacía para "
+                f"{health_label}."
+            )
+
+        csv_dataframe = pd.read_csv(io.StringIO(raw_text))
+
+        if csv_dataframe.empty:
+            LOGGER.warning(
+                "El BCE no devolvió observaciones para la serie %s.",
+                health_label,
+            )
+            _mark_health(health_label, ok=False, detail="sin observaciones")
+            return _empty_fred_dataframe(), "ERROR - sin observaciones"
+
+        # La API del BCE puede devolver las columnas en distinto orden o
+        # con mayúsculas/minúsculas distintas según el dataflow - se
+        # busca TIME_PERIOD/OBS_VALUE de forma flexible, sin asumir un
+        # orden fijo de columnas.
+        column_lookup = {
+            str(column).strip().upper(): column for column in csv_dataframe.columns
+        }
+        time_column = column_lookup.get("TIME_PERIOD")
+        value_column = column_lookup.get("OBS_VALUE")
+
+        if time_column is None or value_column is None:
+            raise ValueError(
+                "La respuesta CSV del BCE no contiene las columnas "
+                "esperadas TIME_PERIOD/OBS_VALUE para "
+                f"{health_label}. Columnas recibidas: "
+                f"{list(csv_dataframe.columns)}"
+            )
+
+        renamed_dataframe = csv_dataframe.rename(
+            columns={time_column: "Date", value_column: "Value"}
+        )[["Date", "Value"]]
+
+        cleaned_dataframe = _clean_fred_dataframe(renamed_dataframe)
+
+        download_ok = not cleaned_dataframe.empty
+        _mark_health(health_label, ok=download_ok)
+
+        LOGGER.info(
+            "Descarga ECB SDW finalizada para %s. Filas descargadas: %s.",
+            health_label,
+            len(cleaned_dataframe),
+        )
+
+        status = "OK" if download_ok else "ERROR - datos no aprovechables tras la limpieza"
+        return cleaned_dataframe, status
+
+    except requests.exceptions.Timeout as error:
+        LOGGER.exception(
+            "Tiempo de espera agotado al descargar del BCE (%s). "
+            "Verifica tu conexión a internet. Detalle: %s",
+            health_label,
+            error,
+        )
+        _mark_health(health_label, ok=False, detail="timeout")
+        return _empty_fred_dataframe(), "ERROR - timeout"
+
+    except requests.exceptions.HTTPError as error:
+        status_code = getattr(error.response, "status_code", "desconocido")
+        LOGGER.exception(
+            "Error HTTP al descargar del BCE (%s). Estado HTTP: %s.",
+            health_label,
+            status_code,
+        )
+        _mark_health(health_label, ok=False, detail="HTTP error")
+        return _empty_fred_dataframe(), f"ERROR - HTTP {status_code}"
+
+    except requests.exceptions.RequestException as error:
+        LOGGER.exception(
+            "Error de red al descargar del BCE (%s). Tipo de error: %s. "
+            "Detalle: %s",
+            health_label,
+            type(error).__name__,
+            error,
+        )
+        _mark_health(health_label, ok=False, detail="red")
+        return _empty_fred_dataframe(), "ERROR - red"
+
+    except ValueError as error:
+        LOGGER.exception(
+            "Error de validación o formato al procesar datos del BCE "
+            "(%s). Detalle: %s",
+            health_label,
+            error,
+        )
+        _mark_health(health_label, ok=False, detail="validación")
+        return _empty_fred_dataframe(), f"ERROR - {error}"
+
+    except Exception as error:
+        LOGGER.exception(
+            "Error inesperado al descargar del BCE (%s). Tipo de error: "
+            "%s. Detalle: %s",
+            health_label,
+            type(error).__name__,
+            error,
+        )
+        _mark_health(health_label, ok=False, detail="inesperado")
+        return _empty_fred_dataframe(), f"ERROR - {type(error).__name__}"
 
 
 def get_yfinance_data(ticker: str) -> pd.DataFrame:

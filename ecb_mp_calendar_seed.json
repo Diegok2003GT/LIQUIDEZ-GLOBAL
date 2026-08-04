@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-08-04T00:00:00Z",
+  "source": "ECB press release pr130610 (https://www.ecb.europa.eu/press/pr/date/2013/html/pr130610.en.html), extracted and verified manually during architecture research - complete, unredacted table, used as the golden-reference year for self-verification of the scraper.",
+  "periods": [
+    {"Year": 2014, "MP": 1, "GCMeetingDate": "2014-01-09", "StartDate": "2014-01-15", "EndDate": "2014-02-11"},
+    {"Year": 2014, "MP": 2, "GCMeetingDate": "2014-02-06", "StartDate": "2014-02-12", "EndDate": "2014-03-11"},
+    {"Year": 2014, "MP": 3, "GCMeetingDate": "2014-03-06", "StartDate": "2014-03-12", "EndDate": "2014-04-08"},
+    {"Year": 2014, "MP": 4, "GCMeetingDate": "2014-04-03", "StartDate": "2014-04-09", "EndDate": "2014-05-13"},
+    {"Year": 2014, "MP": 5, "GCMeetingDate": "2014-05-08", "StartDate": "2014-05-14", "EndDate": "2014-06-10"},
+    {"Year": 2014, "MP": 6, "GCMeetingDate": "2014-06-05", "StartDate": "2014-06-11", "EndDate": "2014-07-08"},
+    {"Year": 2014, "MP": 7, "GCMeetingDate": "2014-07-03", "StartDate": "2014-07-09", "EndDate": "2014-08-12"},
+    {"Year": 2014, "MP": 8, "GCMeetingDate": "2014-08-07", "StartDate": "2014-08-13", "EndDate": "2014-09-09"},
+    {"Year": 2014, "MP": 9, "GCMeetingDate": "2014-09-04", "StartDate": "2014-09-10", "EndDate": "2014-10-07"},
+    {"Year": 2014, "MP": 10, "GCMeetingDate": "2014-10-02", "StartDate": "2014-10-08", "EndDate": "2014-11-11"},
+    {"Year": 2014, "MP": 11, "GCMeetingDate": "2014-11-06", "StartDate": "2014-11-12", "EndDate": "2014-12-09"},
+    {"Year": 2014, "MP": 12, "GCMeetingDate": "2014-12-04", "StartDate": "2014-12-10", "EndDate": "2015-01-13"}
+  ]
+}
