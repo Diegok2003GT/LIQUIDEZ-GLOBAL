@@ -1,0 +1,601 @@
+{
+  "generated_at": "2026-08-04T23:32:55.370075Z",
+  "source": "ECB official press releases / PDFs (2004+), validated structurally",
+  "periods": [
+    {
+      "Year": 2015,
+      "MP": 1,
+      "GCMeetingDate": "2015-01-22",
+      "StartDate": "2015-01-28",
+      "EndDate": "2015-03-10"
+    },
+    {
+      "Year": 2015,
+      "MP": 2,
+      "GCMeetingDate": "2015-03-05",
+      "StartDate": "2015-03-11",
+      "EndDate": "2015-04-21"
+    },
+    {
+      "Year": 2015,
+      "MP": 3,
+      "GCMeetingDate": "2015-04-15",
+      "StartDate": "2015-04-22",
+      "EndDate": "2015-06-09"
+    },
+    {
+      "Year": 2015,
+      "MP": 4,
+      "GCMeetingDate": "2015-06-03",
+      "StartDate": "2015-06-10",
+      "EndDate": "2015-07-21"
+    },
+    {
+      "Year": 2015,
+      "MP": 5,
+      "GCMeetingDate": "2015-07-16",
+      "StartDate": "2015-07-22",
+      "EndDate": "2015-09-08"
+    },
+    {
+      "Year": 2015,
+      "MP": 6,
+      "GCMeetingDate": "2015-09-03",
+      "StartDate": "2015-09-09",
+      "EndDate": "2015-10-27"
+    },
+    {
+      "Year": 2015,
+      "MP": 7,
+      "GCMeetingDate": "2015-10-22",
+      "StartDate": "2015-10-28",
+      "EndDate": "2015-12-08"
+    },
+    {
+      "Year": 2015,
+      "MP": 8,
+      "GCMeetingDate": "2015-12-03",
+      "StartDate": "2015-12-09",
+      "EndDate": "2016-01-26"
+    },
+    {
+      "Year": 2017,
+      "MP": 1,
+      "GCMeetingDate": "2017-01-19",
+      "StartDate": "2017-01-25",
+      "EndDate": "2017-03-14"
+    },
+    {
+      "Year": 2017,
+      "MP": 2,
+      "GCMeetingDate": "2017-03-09",
+      "StartDate": "2017-03-15",
+      "EndDate": "2017-05-02"
+    },
+    {
+      "Year": 2017,
+      "MP": 3,
+      "GCMeetingDate": "2017-04-27",
+      "StartDate": "2017-05-03",
+      "EndDate": "2017-06-13"
+    },
+    {
+      "Year": 2017,
+      "MP": 4,
+      "GCMeetingDate": "2017-06-08",
+      "StartDate": "2017-06-14",
+      "EndDate": "2017-07-25"
+    },
+    {
+      "Year": 2017,
+      "MP": 5,
+      "GCMeetingDate": "2017-07-20",
+      "StartDate": "2017-07-26",
+      "EndDate": "2017-09-12"
+    },
+    {
+      "Year": 2017,
+      "MP": 6,
+      "GCMeetingDate": "2017-09-07",
+      "StartDate": "2017-09-13",
+      "EndDate": "2017-10-31"
+    },
+    {
+      "Year": 2017,
+      "MP": 7,
+      "GCMeetingDate": "2017-10-26",
+      "StartDate": "2017-11-01",
+      "EndDate": "2017-12-19"
+    },
+    {
+      "Year": 2017,
+      "MP": 8,
+      "GCMeetingDate": "2017-12-14",
+      "StartDate": "2017-12-20",
+      "EndDate": "2018-01-30"
+    },
+    {
+      "Year": 2018,
+      "MP": 1,
+      "GCMeetingDate": "2018-01-25",
+      "StartDate": "2018-01-31",
+      "EndDate": "2018-03-13"
+    },
+    {
+      "Year": 2018,
+      "MP": 2,
+      "GCMeetingDate": "2018-03-08",
+      "StartDate": "2018-03-14",
+      "EndDate": "2018-05-02"
+    },
+    {
+      "Year": 2018,
+      "MP": 3,
+      "GCMeetingDate": "2018-04-26",
+      "StartDate": "2018-05-03",
+      "EndDate": "2018-06-19"
+    },
+    {
+      "Year": 2018,
+      "MP": 4,
+      "GCMeetingDate": "2018-06-14",
+      "StartDate": "2018-06-20",
+      "EndDate": "2018-07-31"
+    },
+    {
+      "Year": 2018,
+      "MP": 5,
+      "GCMeetingDate": "2018-07-26",
+      "StartDate": "2018-08-01",
+      "EndDate": "2018-09-18"
+    },
+    {
+      "Year": 2018,
+      "MP": 6,
+      "GCMeetingDate": "2018-09-13",
+      "StartDate": "2018-09-19",
+      "EndDate": "2018-10-30"
+    },
+    {
+      "Year": 2018,
+      "MP": 7,
+      "GCMeetingDate": "2018-10-25",
+      "StartDate": "2018-10-31",
+      "EndDate": "2018-12-18"
+    },
+    {
+      "Year": 2018,
+      "MP": 8,
+      "GCMeetingDate": "2018-12-13",
+      "StartDate": "2018-12-19",
+      "EndDate": "2019-01-29"
+    },
+    {
+      "Year": 2019,
+      "MP": 1,
+      "GCMeetingDate": "2019-01-24",
+      "StartDate": "2019-01-30",
+      "EndDate": "2019-03-12"
+    },
+    {
+      "Year": 2019,
+      "MP": 2,
+      "GCMeetingDate": "2019-03-07",
+      "StartDate": "2019-03-13",
+      "EndDate": "2019-04-16"
+    },
+    {
+      "Year": 2019,
+      "MP": 3,
+      "GCMeetingDate": "2019-04-10",
+      "StartDate": "2019-04-17",
+      "EndDate": "2019-06-11"
+    },
+    {
+      "Year": 2019,
+      "MP": 4,
+      "GCMeetingDate": "2019-06-06",
+      "StartDate": "2019-06-12",
+      "EndDate": "2019-07-30"
+    },
+    {
+      "Year": 2019,
+      "MP": 5,
+      "GCMeetingDate": "2019-07-25",
+      "StartDate": "2019-07-31",
+      "EndDate": "2019-09-17"
+    },
+    {
+      "Year": 2019,
+      "MP": 6,
+      "GCMeetingDate": "2019-09-12",
+      "StartDate": "2019-09-18",
+      "EndDate": "2019-10-29"
+    },
+    {
+      "Year": 2019,
+      "MP": 7,
+      "GCMeetingDate": "2019-10-24",
+      "StartDate": "2019-10-30",
+      "EndDate": "2019-12-17"
+    },
+    {
+      "Year": 2019,
+      "MP": 8,
+      "GCMeetingDate": "2019-12-12",
+      "StartDate": "2019-12-18",
+      "EndDate": "2020-01-28"
+    },
+    {
+      "Year": 2020,
+      "MP": 1,
+      "GCMeetingDate": "2020-01-23",
+      "StartDate": "2020-01-29",
+      "EndDate": "2020-03-17"
+    },
+    {
+      "Year": 2020,
+      "MP": 2,
+      "GCMeetingDate": "2020-03-12",
+      "StartDate": "2020-03-18",
+      "EndDate": "2020-05-05"
+    },
+    {
+      "Year": 2020,
+      "MP": 3,
+      "GCMeetingDate": "2020-04-30",
+      "StartDate": "2020-05-06",
+      "EndDate": "2020-06-09"
+    },
+    {
+      "Year": 2020,
+      "MP": 4,
+      "GCMeetingDate": "2020-06-04",
+      "StartDate": "2020-06-10",
+      "EndDate": "2020-07-21"
+    },
+    {
+      "Year": 2020,
+      "MP": 5,
+      "GCMeetingDate": "2020-07-16",
+      "StartDate": "2020-07-22",
+      "EndDate": "2020-09-15"
+    },
+    {
+      "Year": 2020,
+      "MP": 6,
+      "GCMeetingDate": "2020-09-10",
+      "StartDate": "2020-09-16",
+      "EndDate": "2020-11-03"
+    },
+    {
+      "Year": 2020,
+      "MP": 7,
+      "GCMeetingDate": "2020-10-29",
+      "StartDate": "2020-11-04",
+      "EndDate": "2020-12-15"
+    },
+    {
+      "Year": 2020,
+      "MP": 8,
+      "GCMeetingDate": "2020-12-10",
+      "StartDate": "2020-12-16",
+      "EndDate": "2021-01-26"
+    },
+    {
+      "Year": 2021,
+      "MP": 1,
+      "GCMeetingDate": "2021-01-21",
+      "StartDate": "2021-01-27",
+      "EndDate": "2021-03-16"
+    },
+    {
+      "Year": 2021,
+      "MP": 2,
+      "GCMeetingDate": "2021-03-11",
+      "StartDate": "2021-03-17",
+      "EndDate": "2021-04-27"
+    },
+    {
+      "Year": 2021,
+      "MP": 3,
+      "GCMeetingDate": "2021-04-22",
+      "StartDate": "2021-04-28",
+      "EndDate": "2021-06-15"
+    },
+    {
+      "Year": 2021,
+      "MP": 4,
+      "GCMeetingDate": "2021-06-10",
+      "StartDate": "2021-06-16",
+      "EndDate": "2021-07-27"
+    },
+    {
+      "Year": 2021,
+      "MP": 5,
+      "GCMeetingDate": "2021-07-22",
+      "StartDate": "2021-07-28",
+      "EndDate": "2021-09-14"
+    },
+    {
+      "Year": 2021,
+      "MP": 6,
+      "GCMeetingDate": "2021-09-09",
+      "StartDate": "2021-09-15",
+      "EndDate": "2021-11-02"
+    },
+    {
+      "Year": 2021,
+      "MP": 7,
+      "GCMeetingDate": "2021-10-28",
+      "StartDate": "2021-11-03",
+      "EndDate": "2021-12-21"
+    },
+    {
+      "Year": 2021,
+      "MP": 8,
+      "GCMeetingDate": "2021-12-16",
+      "StartDate": "2021-12-22",
+      "EndDate": "2022-02-08"
+    },
+    {
+      "Year": 2022,
+      "MP": 1,
+      "GCMeetingDate": "2022-02-03",
+      "StartDate": "2022-02-09",
+      "EndDate": "2022-03-15"
+    },
+    {
+      "Year": 2022,
+      "MP": 2,
+      "GCMeetingDate": "2022-03-10",
+      "StartDate": "2022-03-16",
+      "EndDate": "2022-04-19"
+    },
+    {
+      "Year": 2022,
+      "MP": 3,
+      "GCMeetingDate": "2022-04-14",
+      "StartDate": "2022-04-20",
+      "EndDate": "2022-06-14"
+    },
+    {
+      "Year": 2022,
+      "MP": 4,
+      "GCMeetingDate": "2022-06-09",
+      "StartDate": "2022-06-15",
+      "EndDate": "2022-07-26"
+    },
+    {
+      "Year": 2022,
+      "MP": 5,
+      "GCMeetingDate": "2022-07-21",
+      "StartDate": "2022-07-27",
+      "EndDate": "2022-09-13"
+    },
+    {
+      "Year": 2022,
+      "MP": 6,
+      "GCMeetingDate": "2022-09-08",
+      "StartDate": "2022-09-14",
+      "EndDate": "2022-11-01"
+    },
+    {
+      "Year": 2022,
+      "MP": 7,
+      "GCMeetingDate": "2022-10-27",
+      "StartDate": "2022-11-02",
+      "EndDate": "2022-12-20"
+    },
+    {
+      "Year": 2023,
+      "MP": 1,
+      "GCMeetingDate": "2023-02-02",
+      "StartDate": "2023-02-08",
+      "EndDate": "2023-03-21"
+    },
+    {
+      "Year": 2023,
+      "MP": 2,
+      "GCMeetingDate": "2023-03-16",
+      "StartDate": "2023-03-22",
+      "EndDate": "2023-05-09"
+    },
+    {
+      "Year": 2023,
+      "MP": 3,
+      "GCMeetingDate": "2023-05-04",
+      "StartDate": "2023-05-10",
+      "EndDate": "2023-06-20"
+    },
+    {
+      "Year": 2023,
+      "MP": 4,
+      "GCMeetingDate": "2023-06-15",
+      "StartDate": "2023-06-21",
+      "EndDate": "2023-08-01"
+    },
+    {
+      "Year": 2023,
+      "MP": 5,
+      "GCMeetingDate": "2023-07-27",
+      "StartDate": "2023-08-02",
+      "EndDate": "2023-09-19"
+    },
+    {
+      "Year": 2023,
+      "MP": 6,
+      "GCMeetingDate": "2023-09-14",
+      "StartDate": "2023-09-20",
+      "EndDate": "2023-10-31"
+    },
+    {
+      "Year": 2023,
+      "MP": 7,
+      "GCMeetingDate": "2023-10-26",
+      "StartDate": "2023-11-01",
+      "EndDate": "2023-12-19"
+    },
+    {
+      "Year": 2023,
+      "MP": 8,
+      "GCMeetingDate": "2023-12-14",
+      "StartDate": "2023-12-20",
+      "EndDate": "2024-01-30"
+    },
+    {
+      "Year": 2024,
+      "MP": 1,
+      "GCMeetingDate": "2024-01-25",
+      "StartDate": "2024-01-31",
+      "EndDate": "2024-03-12"
+    },
+    {
+      "Year": 2024,
+      "MP": 2,
+      "GCMeetingDate": "2024-03-07",
+      "StartDate": "2024-03-13",
+      "EndDate": "2024-04-16"
+    },
+    {
+      "Year": 2024,
+      "MP": 3,
+      "GCMeetingDate": "2024-04-11",
+      "StartDate": "2024-04-17",
+      "EndDate": "2024-06-11"
+    },
+    {
+      "Year": 2024,
+      "MP": 4,
+      "GCMeetingDate": "2024-06-06",
+      "StartDate": "2024-06-12",
+      "EndDate": "2024-07-23"
+    },
+    {
+      "Year": 2024,
+      "MP": 5,
+      "GCMeetingDate": "2024-07-18",
+      "StartDate": "2024-07-24",
+      "EndDate": "2024-09-17"
+    },
+    {
+      "Year": 2024,
+      "MP": 6,
+      "GCMeetingDate": "2024-09-12",
+      "StartDate": "2024-09-18",
+      "EndDate": "2024-10-22"
+    },
+    {
+      "Year": 2024,
+      "MP": 7,
+      "GCMeetingDate": "2024-10-17",
+      "StartDate": "2024-10-23",
+      "EndDate": "2024-12-17"
+    },
+    {
+      "Year": 2025,
+      "MP": 1,
+      "GCMeetingDate": "2025-01-30",
+      "StartDate": "2025-02-05",
+      "EndDate": "2025-03-11"
+    },
+    {
+      "Year": 2025,
+      "MP": 2,
+      "GCMeetingDate": "2025-03-06",
+      "StartDate": "2025-03-12",
+      "EndDate": "2025-04-22"
+    },
+    {
+      "Year": 2025,
+      "MP": 3,
+      "GCMeetingDate": "2025-04-17",
+      "StartDate": "2025-04-23",
+      "EndDate": "2025-06-10"
+    },
+    {
+      "Year": 2025,
+      "MP": 4,
+      "GCMeetingDate": "2025-06-05",
+      "StartDate": "2025-06-11",
+      "EndDate": "2025-07-29"
+    },
+    {
+      "Year": 2025,
+      "MP": 5,
+      "GCMeetingDate": "2025-07-24",
+      "StartDate": "2025-07-30",
+      "EndDate": "2025-09-16"
+    },
+    {
+      "Year": 2025,
+      "MP": 6,
+      "GCMeetingDate": "2025-09-11",
+      "StartDate": "2025-09-17",
+      "EndDate": "2025-11-04"
+    },
+    {
+      "Year": 2025,
+      "MP": 7,
+      "GCMeetingDate": "2025-10-30",
+      "StartDate": "2025-11-05",
+      "EndDate": "2025-12-22"
+    },
+    {
+      "Year": 2025,
+      "MP": 8,
+      "GCMeetingDate": "2025-12-18",
+      "StartDate": "2025-12-23",
+      "EndDate": "2026-02-10"
+    },
+    {
+      "Year": 2026,
+      "MP": 1,
+      "GCMeetingDate": "2026-02-05",
+      "StartDate": "2026-02-11",
+      "EndDate": "2026-03-24"
+    },
+    {
+      "Year": 2026,
+      "MP": 2,
+      "GCMeetingDate": "2026-03-19",
+      "StartDate": "2026-03-25",
+      "EndDate": "2026-05-05"
+    },
+    {
+      "Year": 2026,
+      "MP": 3,
+      "GCMeetingDate": "2026-04-30",
+      "StartDate": "2026-05-06",
+      "EndDate": "2026-06-16"
+    },
+    {
+      "Year": 2026,
+      "MP": 4,
+      "GCMeetingDate": "2026-06-11",
+      "StartDate": "2026-06-17",
+      "EndDate": "2026-07-28"
+    },
+    {
+      "Year": 2026,
+      "MP": 5,
+      "GCMeetingDate": "2026-07-23",
+      "StartDate": "2026-07-29",
+      "EndDate": "2026-09-15"
+    },
+    {
+      "Year": 2026,
+      "MP": 6,
+      "GCMeetingDate": "2026-09-10",
+      "StartDate": "2026-09-16",
+      "EndDate": "2026-11-03"
+    },
+    {
+      "Year": 2026,
+      "MP": 7,
+      "GCMeetingDate": "2026-10-29",
+      "StartDate": "2026-11-04",
+      "EndDate": "2026-12-22"
+    }
+  ]
+}
