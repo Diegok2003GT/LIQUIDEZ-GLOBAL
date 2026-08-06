@@ -16,9 +16,19 @@ ILM.D.U2.C.MRR.U2.EUR (la fuente activa de MRR) solo tiene historial
 desde 2024-09-27. El BCE no publica un calendario de Maintenance Periods
 como dataset SDMX/API - solo como comunicados de prensa HTML/PDF. Este
 módulo scrapea esa fuente oficial (una página índice estable,
-`ecb.europa.eu/press/calendars/caleu/html/index.en.html`, verificada en
-vivo durante el diseño de esta arquitectura), la valida estructuralmente
-antes de confiar en ella, y la cachea de forma permanente.
+`ecb.europa.eu/press/calendars/reserve/html/index.en.html` - ver
+ECB_MP_CALENDAR_INDEX_URL en config.py; corregida tras una auditoría que
+detectó que apuntaba por error al índice de "tender operations" en vez
+del de "reserve maintenance periods" -, la valida estructuralmente antes
+de confiar en ella, y la cachea de forma permanente.
+
+FORMATO HEREDADO (2004-2006): estos tres años publicaron la tabla del
+calendario sin columna "MP" numérica explícita (la introduce por primera
+vez el calendario de 2007). `_row_looks_like_legacy_mp_row` y
+`_parse_legacy_candidate_rows` reconocen y numeran secuencialmente esas
+filas, únicamente como respaldo cuando la heurística estándar
+(`_row_looks_like_mp_row`) no encuentra ninguna fila - no cambia el
+comportamiento ya validado para 2007 en adelante.
 
 FILOSOFÍA DE CONFIANZA: a diferencia de las series SDMX del resto del
 programa (fuente oficial + API estable = confianza directa), el scraping
@@ -134,6 +144,88 @@ def _row_looks_like_mp_row(cells: List[str]) -> bool:
     return dates_found >= 3
 
 
+def _row_looks_like_legacy_mp_row(cells: List[str]) -> bool:
+    """
+    Heurística de RESPALDO para el formato heredado que el BCE usó en los
+    calendarios de Maintenance Periods hasta el de 2006 inclusive
+    (publicado en 2005) - verificado en vivo contra los comunicados
+    oficiales de 2004, 2005 y 2006. Ese formato NO tiene una columna "MP"
+    numérica explícita (la introduce por primera vez el calendario de
+    2007, publicado en 2006): la primera celda es la fecha de la reunión
+    del Consejo de Gobierno, o un guion "-" para el único período
+    transitorio conocido (el de 2004, sin reunión de Consejo asociada).
+
+    Esta heurística se usa EXCLUSIVAMENTE como respaldo, cuando
+    `_row_looks_like_mp_row` no reconoce ninguna fila en la fuente - así
+    que no cambia en absoluto el comportamiento ya validado para los años
+    que sí tienen columna "MP" (2007 en adelante).
+
+    Ancla de detección (para minimizar falsos positivos al no contar con
+    la columna "MP" como señal): la ÚLTIMA celda debe ser un número
+    entero de días dentro del rango estructural ya validado del programa
+    (ECB_MP_MIN_DAYS-ECB_MP_MAX_DAYS), y la fila debe contener al menos 2
+    fechas reconocibles (inicio y fin; la fecha de reunión del Consejo es
+    opcional porque el período transitorio de 2004 no la tiene).
+    """
+    if len(cells) < 4:
+        return False
+    last_cell = cells[-1].strip()
+    if not last_cell.isdigit():
+        return False
+    duration_days = int(last_cell)
+    if not (ECB_MP_MIN_DAYS <= duration_days <= ECB_MP_MAX_DAYS):
+        return False
+    dates_found = sum(1 for cell in cells if _parse_english_date(cell) is not None)
+    return dates_found >= 2
+
+
+def _parse_legacy_candidate_rows(
+    candidate_rows: List[List[str]], year: int
+) -> Optional[pd.DataFrame]:
+    """
+    Construye el DataFrame del calendario a partir de filas reconocidas
+    por `_row_looks_like_legacy_mp_row`. Como el formato heredado no trae
+    un número de MP explícito en la fuente, se asigna uno secuencial
+    (1, 2, 3...) según el orden cronológico real de StartDate dentro del
+    año - es el único criterio disponible en el propio comunicado del
+    BCE, y es consistente con cómo el BCE numera los MP en los años que
+    sí traen la columna explícita.
+    """
+    parsed_rows = []
+    for cells in candidate_rows:
+        found_dates = [d for d in (_parse_english_date(c) for c in cells) if d is not None]
+        if len(found_dates) < 2:
+            continue
+        if len(found_dates) >= 3:
+            gc_meeting, start_date, end_date = found_dates[0], found_dates[1], found_dates[2]
+        else:
+            gc_meeting, start_date, end_date = None, found_dates[0], found_dates[1]
+        parsed_rows.append(
+            {
+                "Year": start_date.year,
+                "GCMeetingDate": gc_meeting,
+                "StartDate": start_date,
+                "EndDate": end_date,
+            }
+        )
+
+    if not parsed_rows:
+        return None
+
+    calendar_dataframe = pd.DataFrame(parsed_rows)
+    calendar_dataframe = calendar_dataframe[calendar_dataframe["Year"] == year]
+    if calendar_dataframe.empty:
+        return None
+
+    calendar_dataframe = calendar_dataframe.drop_duplicates(
+        subset=["StartDate", "EndDate"], keep="first"
+    )
+    calendar_dataframe = calendar_dataframe.sort_values(by="StartDate").reset_index(drop=True)
+    calendar_dataframe["MP"] = range(1, len(calendar_dataframe) + 1)
+
+    return calendar_dataframe.loc[:, CALENDAR_COLUMNS]
+
+
 def _extract_year_table_from_html(html_text: str, year: int) -> Optional[pd.DataFrame]:
     """
     Busca, dentro del HTML de un comunicado del BCE, la tabla del
@@ -179,6 +271,28 @@ def _extract_year_table_from_html(html_text: str, year: int) -> Optional[pd.Data
             cells = [part.strip() for part in re.split(r"\t|  +", line) if part.strip()]
             if _row_looks_like_mp_row(cells):
                 candidate_rows.append(cells)
+
+    # Respaldo adicional: formato heredado sin columna "MP" (calendarios
+    # hasta 2006 inclusive, ver `_row_looks_like_legacy_mp_row`). Solo se
+    # intenta si la heurística estándar no reconoció NINGUNA fila en toda
+    # la fuente - no afecta a los años que ya funcionan correctamente.
+    if not candidate_rows:
+        legacy_candidate_rows: List[List[str]] = []
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = [cell.get_text(strip=True) for cell in row.find_all(["td", "th"])]
+                if _row_looks_like_legacy_mp_row(cells):
+                    legacy_candidate_rows.append(cells)
+
+        if not legacy_candidate_rows:
+            text_lines = soup.get_text("\n").split("\n")
+            for line in text_lines:
+                cells = [part.strip() for part in re.split(r"\t|  +", line) if part.strip()]
+                if _row_looks_like_legacy_mp_row(cells):
+                    legacy_candidate_rows.append(cells)
+
+        if legacy_candidate_rows:
+            return _parse_legacy_candidate_rows(legacy_candidate_rows, year)
 
     if not candidate_rows:
         return None
@@ -230,30 +344,38 @@ def _extract_year_table_from_pdf(pdf_bytes: bytes, year: int) -> Optional[pd.Dat
         return None
 
     parsed_rows = []
+    legacy_candidate_rows: List[List[str]] = []
     try:
         with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf_document:
             for page in pdf_document.pages:
                 for table in page.extract_tables() or []:
                     for row in table:
                         cells = [str(cell).strip() if cell else "" for cell in row]
-                        if not _row_looks_like_mp_row(cells):
-                            continue
-                        mp_number = int(cells[0].strip())
-                        found_dates = [
-                            d for d in (_parse_english_date(c) for c in cells) if d is not None
-                        ]
-                        if len(found_dates) < 3:
-                            continue
-                        gc_meeting, start_date, end_date = found_dates[0], found_dates[1], found_dates[2]
-                        parsed_rows.append(
-                            {
-                                "Year": start_date.year,
-                                "MP": mp_number,
-                                "GCMeetingDate": gc_meeting,
-                                "StartDate": start_date,
-                                "EndDate": end_date,
-                            }
-                        )
+                        if _row_looks_like_mp_row(cells):
+                            mp_number = int(cells[0].strip())
+                            found_dates = [
+                                d for d in (_parse_english_date(c) for c in cells) if d is not None
+                            ]
+                            if len(found_dates) < 3:
+                                continue
+                            gc_meeting, start_date, end_date = (
+                                found_dates[0], found_dates[1], found_dates[2]
+                            )
+                            parsed_rows.append(
+                                {
+                                    "Year": start_date.year,
+                                    "MP": mp_number,
+                                    "GCMeetingDate": gc_meeting,
+                                    "StartDate": start_date,
+                                    "EndDate": end_date,
+                                }
+                            )
+                        elif _row_looks_like_legacy_mp_row(cells):
+                            # Solo se acumula como candidata; se procesa
+                            # más abajo, y únicamente si la heurística
+                            # estándar no encontró NINGUNA fila en todo el
+                            # documento (ver `_row_looks_like_legacy_mp_row`).
+                            legacy_candidate_rows.append(cells)
     except Exception as error:
         LOGGER.exception(
             "Error al extraer tabla del PDF del calendario BCE para %s. "
@@ -265,6 +387,8 @@ def _extract_year_table_from_pdf(pdf_bytes: bytes, year: int) -> Optional[pd.Dat
         return None
 
     if not parsed_rows:
+        if legacy_candidate_rows:
+            return _parse_legacy_candidate_rows(legacy_candidate_rows, year)
         return None
 
     calendar_dataframe = pd.DataFrame(parsed_rows)
@@ -355,7 +479,16 @@ def _validate_year_calendar(calendar_dataframe: pd.DataFrame, year: int) -> Tupl
             return False, f"MP {row.get('MP')} tiene fechas faltantes."
         if row["EndDate"] <= row["StartDate"]:
             return False, f"MP {row['MP']}: fecha de fin no es posterior al inicio."
-        duration_days = (row["EndDate"] - row["StartDate"]).days
+        # Metodología oficial del BCE (verificada dato-por-dato contra
+        # comunicados reales de 2004, 2005, 2014 y 2026): la "Length of
+        # maintenance period (days)" que publica el BCE cuenta AMBOS
+        # extremos - el día de inicio y el día de fin - como parte del
+        # período. Por eso la duración correcta es (EndDate - StartDate)
+        # + 1 día, no la diferencia exclusiva entre las fechas. Usar la
+        # diferencia exclusiva subestima la duración real en 1 día y
+        # rechazaba periodos genuinos que caen cerca del límite inferior
+        # (p. ej. el primer MP de 2005, oficialmente de 20 días).
+        duration_days = (row["EndDate"] - row["StartDate"]).days + 1
         if not (ECB_MP_MIN_DAYS <= duration_days <= ECB_MP_MAX_DAYS):
             return False, (
                 f"MP {row['MP']}: duración {duration_days} días fuera de rango "

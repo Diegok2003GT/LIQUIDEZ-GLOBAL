@@ -461,13 +461,26 @@ ECB_BSI_MRR_SERIES_KEY = "M.U2.N.R.MRR.X.1.A1.3000.Z01.E"
 
 # --- Calendario oficial de Maintenance Periods ---
 # Página índice oficial y estable del BCE que enlaza, año por año, a los
-# comunicados/PDF con los calendarios de maintenance periods. Verificada
-# en vivo durante el diseño de esta arquitectura (cobertura real: 2004 en
-# adelante). NO es una API SDMX - es HTML/PDF oficial, por eso este
-# módulo trata cualquier resultado como "no confiable hasta que pase
-# validación estructural", nunca como una fuente de la misma categoría
-# que las series SDMX del resto del programa.
-ECB_MP_CALENDAR_INDEX_URL = "https://www.ecb.europa.eu/press/calendars/caleu/html/index.en.html"
+# comunicados/PDF con los calendarios de RESERVE MAINTENANCE PERIODS.
+# IMPORTANTE (corrección de auditoría, verificada en vivo): el BCE
+# mantiene DOS índices de calendarios distintos y fácilmente confundibles
+# - .../press/calendars/caleu/... (operaciones de tender/subasta, MRO y
+# LTRO) y .../press/calendars/reserve/... (Maintenance Periods, el que
+# necesita este módulo). Antes de esta corrección, ECB_MP_CALENDAR_INDEX_URL
+# apuntaba al índice de "caleu" (tender operations) por error, lo que
+# hacía que el scraper descubriera para cada año el comunicado equivocado
+# (sin la tabla de Maintenance Periods) para todos los años en que el BCE
+# publicaba comunicados separados de tender y de reserve maintenance
+# (2004-2013 aprox.; desde ~2014 el BCE empezó a fusionar ambos
+# comunicados en uno solo, por lo que el índice equivocado "funcionaba"
+# igualmente a partir de esa fecha). Verificada en vivo (cobertura real:
+# 2004 en adelante, y de hecho el propio índice enlaza también años
+# anteriores a 2004, que el módulo ignora vía ECB_MP_CALENDAR_FIRST_YEAR).
+# NO es una API SDMX - es HTML/PDF oficial, por eso este módulo trata
+# cualquier resultado como "no confiable hasta que pase validación
+# estructural", nunca como una fuente de la misma categoría que las
+# series SDMX del resto del programa.
+ECB_MP_CALENDAR_INDEX_URL = "https://www.ecb.europa.eu/press/calendars/reserve/html/index.en.html"
 
 # Primer año con cobertura automática fiable (antes de 2004 cambia la
 # propia definición operativa del Maintenance Period - fuera de alcance
